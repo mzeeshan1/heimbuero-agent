@@ -137,6 +137,18 @@ def publish_to_wordpress(title, content):
     )
     return response.status_code == 201, response.json().get("link", "")
 
+def request_google_indexing(url):
+    try:
+        indexing_response = requests.post(
+            "https://indexing.googleapis.com/v3/urlNotifications:publish",
+            headers={"Content-Type": "application/json"},
+            json={"url": url, "type": "URL_UPDATED"}
+        )
+        print(f"Indexing request status: {indexing_response.status_code}")
+    except Exception as e:
+        print(f"Indexing request failed: {e}")
+
+
 
 def get_published_titles():
     response = requests.get(
@@ -215,11 +227,12 @@ def run_agent():
     success, link = publish_to_wordpress(keyword, content)
 
     if success:
+        request_google_indexing(link)
         send_telegram(
             f"<b>Article published successfully!</b>\n\n"
             f"<b>Title:</b> {keyword}\n"
             f"<b>URL:</b> {link}\n\n"
-            f"Google will index this within 1-7 days."
+            f"Indexing request sent to Google automatically."
         )
     else:
         send_telegram(
