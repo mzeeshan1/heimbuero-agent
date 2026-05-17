@@ -132,8 +132,7 @@ def publish_to_wordpress(title, content):
             "title": title,
             "content": content,
             "status": "publish",
-            "categories": [],
-            "tags": [],
+            "categories": [4],
         }
     )
     return response.status_code == 201, response.json().get("link", "")
