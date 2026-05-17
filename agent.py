@@ -85,6 +85,7 @@ def generate_article(keyword):
                     f"- Mindestens 1200 Wörter\n"
                     f"- SEO-optimiert für das Keyword\n"
                     f"- Struktur: H1 Titel, Einleitung, H2 Abschnitte, Fazit\n"
+                    f"- Verwende immer das aktuelle Jahr {datetime.now().year}, niemals ältere Jahre\n"
                     f"- Praxisnahe Empfehlungen für Heimarbeiter in Deutschland\n"
                     f"- Füge 3-5 Amazon.de Produktlinks ein mit diesem Format: "
                     f"<a href='https://www.amazon.de/s?k=SUCHBEGRIFF&tag={AMAZON_TRACKING_ID}' rel='nofollow' target='_blank'>Produktname auf Amazon ansehen</a>\n"
@@ -148,6 +149,31 @@ def get_published_titles():
     return []
 
 
+def get_image_for_article(keyword):
+    response = requests.get(
+        "https://api.unsplash.com/search/photos",
+        params={
+            "query": keyword,
+            "per_page": 1,
+            "orientation": "landscape"
+        },
+        headers={"Authorization": f"Client-ID {os.environ.get('UNSPLASH_ACCESS_KEY')}"}
+    )
+    data = response.json()
+    if data.get("results"):
+        photo = data["results"][0]
+        img_url = photo["urls"]["regular"]
+        photographer = photo["user"]["name"]
+        photographer_url = photo["user"]["links"]["html"]
+        return f'''<figure style="margin:0 0 2rem 0;">
+<img src="{img_url}" alt="{keyword}" style="width:100%;height:400px;object-fit:cover;border-radius:8px;">
+<figcaption style="font-size:12px;color:#666;margin-top:6px;">
+Foto: <a href="{photographer_url}?utm_source=heimbuero_test&utm_medium=referral" target="_blank">{photographer}</a> on <a href="https://unsplash.com/?utm_source=heimbuero_test&utm_medium=referral" target="_blank">Unsplash</a>
+</figcaption>
+</figure>'''
+    return ""
+
+
 def run_agent():
     send_telegram(
         "<b>Heimbuero Agent starting up</b>\n\n"
@@ -182,7 +208,10 @@ def run_agent():
         return
 
     send_telegram(f"Approved! Writing full article for: <b>{keyword}</b>...")
-    content = generate_article(keyword)
+    image_html = get_image_for_article(keyword)
+    content = image_html + generate_article(keyword)
+
+
 
     success, link = publish_to_wordpress(keyword, content)
 
