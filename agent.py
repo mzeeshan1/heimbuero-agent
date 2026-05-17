@@ -87,7 +87,7 @@ def generate_article(keyword):
                     f"- Natürliche Erwähnung von Amazon-Produkten wo sinnvoll\n"
                     f"- Professioneller aber freundlicher Ton\n"
                     f"- HTML Format mit korrekten Heading-Tags\n\n"
-                    f"Gib nur den HTML-Artikelinhalt zurück, ohne DOCTYPE oder Body-Tags."
+                    f"Gib nur den HTML-Artikelinhalt zurück, ohne DOCTYPE oder Body-Tags. Kein Markdown, keine Code-Blöcke, kein ```html."
                 )
             }]
         }
