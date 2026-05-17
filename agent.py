@@ -10,6 +10,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 WP_URL = os.environ.get("WP_URL")
 WP_USER = os.environ.get("WP_USER")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD")
+AMAZON_TRACKING_ID = os.environ.get("AMAZON_TRACKING_ID")
+
 
 KEYWORDS = [
     "Bester Bürostuhl unter 200 Euro",
@@ -84,12 +86,13 @@ def generate_article(keyword):
                     f"- SEO-optimiert für das Keyword\n"
                     f"- Struktur: H1 Titel, Einleitung, H2 Abschnitte, Fazit\n"
                     f"- Praxisnahe Empfehlungen für Heimarbeiter in Deutschland\n"
-                    f"- Natürliche Erwähnung von Amazon-Produkten wo sinnvoll\n"
+                    f"- Füge 3-5 Amazon.de Produktlinks ein mit diesem Format: "
+                    f"<a href='https://www.amazon.de/s?k=SUCHBEGRIFF&tag={AMAZON_TRACKING_ID}' rel='nofollow' target='_blank'>Produktname auf Amazon ansehen</a>\n"
+                    f"- Ersetze SUCHBEGRIFF mit dem passenden deutschen Suchbegriff für das Produkt\n"
                     f"- Professioneller aber freundlicher Ton\n"
-                    f"- HTML Format mit korrekten Heading-Tags\n\n"
-                    f"Gib nur den HTML-Artikelinhalt zurück, ohne DOCTYPE oder Body-Tags. Kein Markdown, keine Code-Blöcke, kein ```html."
-                )
-            }]
+                    f"- HTML Format mit korrekten Heading-Tags\n"
+                    f"- Kein Markdown, keine Code-Blöcke, kein ```html Tag am Anfang, kein ``` am Ende."
+                )            }]
         }
     )
     data = response.json()
