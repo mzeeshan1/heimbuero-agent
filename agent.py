@@ -349,6 +349,7 @@ def write_article():
                         f"- Professioneller aber freundlicher Ton\n"
                         f"- Reines HTML mit H1/H2/H3 Tags\n"
                         f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html"
+                        f"- Kein Affiliate-Disclaimer, kein Hinweis-Text am Ende des Artikels"
                     )
                 }]
             },
