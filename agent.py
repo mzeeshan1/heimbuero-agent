@@ -141,12 +141,20 @@ TOOLS = [
     },
     {
         "name": "publish_to_wordpress",
-        "description": "Publishes the completed article to WordPress.",
+        "description": (
+            "Publishes the completed article to WordPress. "
+            "The content parameter MUST be the image HTML concatenated with the article HTML "
+            "as a single string. Always combine them before calling this tool: "
+            "content = image_html + article_html"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string"},
-                "content": {"type": "string", "description": "Full HTML including header image."}
+                "title": {"type": "string", "description": "The article title."},
+                "content": {
+                    "type": "string",
+                    "description": "REQUIRED: image HTML + article HTML combined into one string."
+                }
             },
             "required": ["title", "content"]
         }
@@ -519,10 +527,9 @@ Phase 2 — Approval:
 Phase 3 — Create and publish (only if approved):
 10. Call fetch_unsplash_image
 11. Call write_article (include competitor_insights so article beats competition)
-12. Combine image HTML + article content
-13. Call publish_to_wordpress
-14. Call request_google_indexing
-15. Call send_telegram_message with success message, URL, and why this article 
+12. Call publish_to_wordpress with title and content where content = image_html + article_html combined as one string. Both are required
+13. Call request_google_indexing
+14. Call send_telegram_message with success message, URL, and why this article 
     should rank well
 
 If NO: send_telegram_message confirming skip, stop.
