@@ -292,7 +292,15 @@ def fetch_image():
     try:
         r = requests.get(
             "https://api.unsplash.com/search/photos",
-            params={"query": STATE.chosen_keyword, "per_page": 1, "orientation": "landscape"},
+            english_query = STATE.chosen_keyword.replace("Bürostuhl", "office chair") \
+                .replace("Schreibtisch", "desk").replace("Monitor", "monitor") \
+                .replace("Drucker", "printer").replace("Headset", "headset") \
+                .replace("Homeoffice", "home office").replace("Tastatur", "keyboard") \
+                .replace("Maus", "mouse").replace("Lampe", "desk lamp") \
+                .replace("Webcam", "webcam").replace("Laptop", "laptop") \
+                .replace("Test", "").replace("Vergleich", "").replace("bester", "best") \
+                .strip(),
+            params={"query": english_query, "per_page": 1, "orientation": "landscape"},
             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
             timeout=10
         )
