@@ -290,26 +290,45 @@ def send_approval_request():
 
 def fetch_image():
     try:
+        # Translate common German words for better Unsplash results
+        english_query = STATE.chosen_keyword \
+            .replace("Bürostuhl", "office chair") \
+            .replace("Schreibtischstuhl", "office chair") \
+            .replace("Schreibtisch", "desk") \
+            .replace("Schreibtischlampe", "desk lamp") \
+            .replace("Tischlampe", "desk lamp") \
+            .replace("Monitor", "monitor") \
+            .replace("Drucker", "printer") \
+            .replace("Headset", "headset") \
+            .replace("Homeoffice", "home office") \
+            .replace("Tastatur", "keyboard") \
+            .replace("Maus", "mouse") \
+            .replace("Webcam", "webcam") \
+            .replace("Laptop", "laptop") \
+            .replace("Ständer", "stand") \
+            .replace("Höhenverstellbarer", "adjustable") \
+            .replace("Ergonomische", "ergonomic") \
+            .replace("Test", "") \
+            .replace("Vergleich", "") \
+            .replace("bester", "best") \
+            .replace("Bestes", "best") \
+            .replace("Bester", "best") \
+            .strip()
+
+        print(f"[Image] Searching Unsplash for: {english_query}")
+
         r = requests.get(
             "https://api.unsplash.com/search/photos",
-            english_query = STATE.chosen_keyword.replace("Bürostuhl", "office chair") \
-                .replace("Schreibtisch", "desk").replace("Monitor", "monitor") \
-                .replace("Drucker", "printer").replace("Headset", "headset") \
-                .replace("Homeoffice", "home office").replace("Tastatur", "keyboard") \
-                .replace("Maus", "mouse").replace("Lampe", "desk lamp") \
-                .replace("Webcam", "webcam").replace("Laptop", "laptop") \
-                .replace("Test", "").replace("Vergleich", "").replace("bester", "best") \
-                .strip(),
             params={"query": english_query, "per_page": 1, "orientation": "landscape"},
             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
             timeout=10
         )
         data = r.json()
         if data.get("results"):
-            photo          = data["results"][0]
-            img_url        = photo["urls"]["regular"]
-            photographer   = photo["user"]["name"]
-            ph_url         = photo["user"]["links"]["html"]
+            photo        = data["results"][0]
+            img_url      = photo["urls"]["regular"]
+            photographer = photo["user"]["name"]
+            ph_url       = photo["user"]["links"]["html"]
             STATE.image_html = (
                 f'<figure style="margin:0 0 2rem 0;">'
                 f'<img src="{img_url}" alt="{STATE.chosen_keyword}" '
@@ -320,13 +339,12 @@ def fetch_image():
                 f'<a href="https://unsplash.com/?utm_source=heimbuero_test&utm_medium=referral" '
                 f'target="_blank">Unsplash</a></figcaption></figure>'
             )
-            return {"success": True, "photographer": photographer}
+            return {"success": True, "photographer": photographer, "query_used": english_query}
         STATE.image_html = ""
-        return {"success": False, "reason": "no results"}
+        return {"success": False, "reason": "no results", "query_used": english_query}
     except Exception as e:
         STATE.image_html = ""
         return {"success": False, "error": str(e)}
-
 
 def write_article():
     try:
