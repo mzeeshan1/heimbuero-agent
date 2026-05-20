@@ -1,0 +1,10 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python agent.py",
+    "restartPolicyType": "Never",
+    "cronSchedule": "0 10 * * *"
+  }
+}
