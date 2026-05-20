@@ -4,23 +4,25 @@ import time
 import tempfile
 import requests
 import subprocess
+import textwrap
 from datetime import datetime
-from pathlib import Path
+from io import BytesIO
 
 # ── Environment variables ──────────────────────────────────────────────────────
-ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY")
-TELEGRAM_TOKEN       = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID")
-ELEVENLABS_API_KEY   = os.environ.get("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID  = os.environ.get("ELEVENLABS_VOICE_ID", "GoXyzBapJk3AoCJoMQl9")
-PEXELS_API_KEY       = os.environ.get("PEXELS_API_KEY")
-YOUTUBE_CLIENT_ID    = os.environ.get("YOUTUBE_CLIENT_ID")
+ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY")
+TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID")
+ELEVENLABS_API_KEY    = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID   = os.environ.get("ELEVENLABS_VOICE_ID", "GoXyzBapJk3AoCJoMQl9")
+PEXELS_API_KEY        = os.environ.get("PEXELS_API_KEY")
+YOUTUBE_CLIENT_ID     = os.environ.get("YOUTUBE_CLIENT_ID")
 YOUTUBE_CLIENT_SECRET = os.environ.get("YOUTUBE_CLIENT_SECRET")
-YOUTUBE_TOKEN_JSON   = os.environ.get("YOUTUBE_TOKEN_JSON")
-WP_URL               = os.environ.get("WP_URL")
+YOUTUBE_TOKEN_JSON    = os.environ.get("YOUTUBE_TOKEN_JSON")
+WP_URL                = os.environ.get("WP_URL")
 
-MAX_ITERATIONS = 16
+MAX_ITERATIONS = 18
 TEMP_DIR       = tempfile.mkdtemp()
+
 
 # ── Agent state ────────────────────────────────────────────────────────────────
 class VideoState:
@@ -30,37 +32,36 @@ class VideoState:
         self.article_content = ""
         self.script          = ""
         self.audio_path      = ""
+        self.audio_duration  = 0.0
         self.video_clips     = []
         self.final_video     = ""
         self.thumbnail_path  = ""
 
 STATE = VideoState()
 
+
 # ── Tool definitions ───────────────────────────────────────────────────────────
 TOOLS = [
     {
         "name": "get_latest_articles",
-        "description": "Fetches the 10 most recently published articles from WordPress. Returns title, URL and excerpt for each.",
+        "description": "Fetches the 10 most recently published articles from WordPress.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "fetch_article_content",
-        "description": "Fetches the full content of a specific WordPress article by URL.",
+        "description": "Fetches the full content of a specific WordPress article by title and URL.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "article_url": {"type": "string", "description": "Full URL of the article"},
-                "article_title": {"type": "string", "description": "Title of the article"}
+                "article_url":   {"type": "string"},
+                "article_title": {"type": "string"}
             },
             "required": ["article_url", "article_title"]
         }
     },
     {
         "name": "generate_video_script",
-        "description": (
-            "Generates a 60-90 second German video script from the stored article. "
-            "Script includes hook, 3 key points, and call to action. Stores in state."
-        ),
+        "description": "Generates a 60-90 second German video script from the stored article. Stores in state.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
@@ -75,26 +76,28 @@ TOOLS = [
     },
     {
         "name": "fetch_video_clips",
-        "description": "Fetches relevant stock video clips from Pexels based on article topic. Downloads and saves locally.",
+        "description": "Fetches and downloads relevant stock video clips from Pexels. Must fully complete before assemble_video is called.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "search_query": {"type": "string", "description": "English search term for stock footage e.g. 'home office desk'"}
+                "search_query": {"type": "string", "description": "English search term e.g. 'home office desk'"}
             },
             "required": ["search_query"]
         }
     },
     {
         "name": "assemble_video",
-        "description": (
-            "Combines downloaded video clips with voiceover audio using FFmpeg. "
-            "Adds subtitles from script. Produces final MP4 file. Stores path in state."
-        ),
+        "description": "Combines downloaded video clips with voiceover and subtitles into final MP4. ONLY call after BOTH generate_voiceover AND fetch_video_clips have returned success:true.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "generate_thumbnail",
+        "description": "Generates a catchy branded YouTube thumbnail with title text and background image. Call after assemble_video and before upload_to_youtube.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "upload_to_youtube",
-        "description": "Uploads the final video to YouTube with title, description, tags and link to article.",
+        "description": "Uploads the final video and thumbnail to YouTube with full metadata. Returns the live YouTube URL.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
@@ -109,6 +112,7 @@ TOOLS = [
         }
     }
 ]
+
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
@@ -146,7 +150,6 @@ def fetch_article_content(article_url, article_title):
         if r.status_code == 200 and r.json():
             post = r.json()[0]
             raw  = post["content"]["rendered"]
-            # Strip HTML tags for plain text
             import re
             text = re.sub(r"<[^>]+>", " ", raw)
             text = re.sub(r"\s+", " ", text).strip()[:3000]
@@ -177,13 +180,13 @@ def generate_video_script():
                         f"Inhalt: {STATE.article_content[:1500]}\n\n"
                         f"Das Skript soll:\n"
                         f"- Mit einem starken Hook beginnen (Frage oder überraschende Aussage)\n"
-                        f"- 3 wichtigste Erkenntnisse aus dem Artikel nennen\n"
+                        f"- 3 wichtigste Erkenntnisse nennen\n"
                         f"- Konkrete Produktempfehlungen erwähnen\n"
                         f"- Mit Call-to-Action enden: 'Den vollständigen Test findest du auf heimbuero-test.de'\n"
                         f"- Natürlich und gesprächig klingen\n"
-                        f"- Genau für Voiceover geschrieben sein (kein [Pause] oder Anweisungen)\n"
-                        f"- Maximal 200 Wörter\n\n"
-                        f"Gib nur den Skripttext aus, nichts anderes."
+                        f"- Maximal 200 Wörter\n"
+                        f"- KEIN [Pause] oder Regieanweisungen — nur reiner Sprechtext\n\n"
+                        f"Gib nur den Skripttext aus."
                     )
                 }]
             },
@@ -203,7 +206,7 @@ def send_approval_request():
         f"<b>Video Agent — Freigabe erforderlich</b>\n\n"
         f"<b>Artikel:</b> {STATE.article_title}\n"
         f"<b>URL:</b> {STATE.article_url}\n\n"
-        f"<b>Video-Skript:</b>\n{STATE.script}\n\n"
+        f"<b>Video-Skript ({len(STATE.script.split())} Wörter):</b>\n{STATE.script}\n\n"
         f"Mit <b>YES</b> bestätigen oder <b>NO</b> ablehnen."
     )
     try:
@@ -239,17 +242,14 @@ def generate_voiceover():
         audio_path = os.path.join(TEMP_DIR, "voiceover.mp3")
         r = requests.post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-            headers={
-                "xi-api-key":   ELEVENLABS_API_KEY,
-                "Content-Type": "application/json"
-            },
+            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
             json={
-                "text":           STATE.script,
-                "model_id":       "eleven_multilingual_v2",
+                "text":     STATE.script,
+                "model_id": "eleven_multilingual_v2",
                 "voice_settings": {
-                    "stability":        0.5,
-                    "similarity_boost": 0.8,
-                    "style":            0.2,
+                    "stability":         0.5,
+                    "similarity_boost":  0.8,
+                    "style":             0.2,
                     "use_speaker_boost": True
                 }
             },
@@ -259,17 +259,9 @@ def generate_voiceover():
             with open(audio_path, "wb") as f:
                 f.write(r.content)
             STATE.audio_path = audio_path
-
-            # Get audio duration using ffprobe
-            # Estimate duration from file size (mp3 ~128kbps = 16KB/s)
-            duration = 75  # default fallback
-            try:
-                file_size = os.path.getsize(audio_path)
-                duration = file_size / 16000
-            except Exception:
-                pass
-
-
+            duration = os.path.getsize(audio_path) / 16000
+            STATE.audio_duration = duration
+            print(f"[Voiceover] Saved {os.path.getsize(audio_path)} bytes, ~{duration:.1f}s")
             return {"success": True, "audio_path": audio_path, "duration_seconds": round(duration)}
         return {"error": f"ElevenLabs {r.status_code}: {r.text[:200]}", "success": False}
     except Exception as e:
@@ -294,10 +286,8 @@ def fetch_video_clips(search_query):
 
         downloaded = []
         for i, video in enumerate(videos[:4]):
-            # Pick best quality file under 30MB
             files = sorted(
-                [f for f in video.get("video_files", [])
-                 if f.get("width", 0) >= 1280],
+                [f for f in video.get("video_files", []) if f.get("width", 0) >= 1280],
                 key=lambda x: x.get("width", 0)
             )
             if not files:
@@ -305,21 +295,33 @@ def fetch_video_clips(search_query):
             if not files:
                 continue
 
-            video_url  = files[0]["link"]
-            clip_path  = os.path.join(TEMP_DIR, f"clip_{i}.mp4")
+            video_url = files[0]["link"]
+            clip_path = os.path.join(TEMP_DIR, f"clip_{i}.mp4")
 
-            vr = requests.get(video_url, timeout=60, stream=True)
+            vr = requests.get(video_url, timeout=90, stream=True)
             if vr.status_code == 200:
                 with open(clip_path, "wb") as f:
                     for chunk in vr.iter_content(chunk_size=8192):
                         f.write(chunk)
-                downloaded.append(clip_path)
-                print(f"[Video] Downloaded clip {i+1}: {clip_path}")
+                file_size = os.path.getsize(clip_path)
+                if file_size > 10000:
+                    downloaded.append(clip_path)
+                    print(f"[Video] Downloaded clip {i+1}: {file_size//1024}KB")
+                else:
+                    print(f"[Video] Clip {i+1} too small, skipping")
 
         STATE.video_clips = downloaded
         return {"success": True, "clips_downloaded": len(downloaded), "paths": downloaded}
     except Exception as e:
         return {"error": str(e), "success": False}
+
+
+def _fmt_time(seconds):
+    h  = int(seconds // 3600)
+    m  = int((seconds % 3600) // 60)
+    s  = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def assemble_video():
@@ -331,24 +333,24 @@ def assemble_video():
     if audio_size < 10000:
         return {"error": "Audio file too small — voiceover may not have completed.", "success": False}
 
-    # Safety check 2 — clips must be downloaded and valid
+    # Safety check 2 — clips must be fully downloaded
     valid_clips = [c for c in STATE.video_clips if os.path.exists(c) and os.path.getsize(c) > 10000]
     if len(valid_clips) < 2:
-        return {"error": f"Not enough valid clips ({len(valid_clips)}). Wait for fetch_video_clips to complete first.", "success": False}
+        return {"error": f"Only {len(valid_clips)} valid clips — need at least 2. Wait for fetch_video_clips to complete.", "success": False}
     STATE.video_clips = valid_clips
 
     try:
-        # Get audio duration from file size (mp3 ~16KB/s at 128kbps)
-        audio_duration = os.path.getsize(STATE.audio_path) / 16000
-        print(f"[Assemble] Audio duration estimate: {audio_duration:.1f}s, clips: {len(valid_clips)}")
+        audio_duration = STATE.audio_duration if STATE.audio_duration > 0 else audio_size / 16000
+        print(f"[Assemble] Audio duration: {audio_duration:.1f}s, clips: {len(valid_clips)}")
 
+        # Each clip gets equal share of audio duration
         clip_duration = audio_duration / len(valid_clips)
 
-        # Trim each clip to equal duration
+        # Trim each clip to its share
         trimmed_clips = []
         for i, clip in enumerate(valid_clips):
             trimmed = os.path.join(TEMP_DIR, f"trimmed_{i}.mp4")
-            result = subprocess.run([
+            subprocess.run([
                 "ffmpeg", "-y", "-i", clip,
                 "-t", str(clip_duration),
                 "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
@@ -364,23 +366,31 @@ def assemble_video():
         if not trimmed_clips:
             return {"error": "All clip trimming failed", "success": False}
 
-        # Write concat file
-        concat_file = os.path.join(TEMP_DIR, "concat.txt")
-        with open(concat_file, "w") as f:
-            for clip in trimmed_clips:
-                f.write(f"file '{clip}'\n")
+        # Calculate how many loops needed to exceed audio duration
+        single_pass_duration = len(trimmed_clips) * clip_duration
+        loops_needed = int(audio_duration / single_pass_duration) + 2
+        print(f"[Assemble] Looping {len(trimmed_clips)} clips x{loops_needed} to cover {audio_duration:.1f}s")
 
-        # Concatenate clips into one video
+        # Write concat file with enough loops to always exceed audio duration
+        concat_file  = os.path.join(TEMP_DIR, "concat.txt")
         concat_video = os.path.join(TEMP_DIR, "concat_video.mp4")
+        with open(concat_file, "w") as f:
+            for _ in range(loops_needed):
+                for clip in trimmed_clips:
+                    f.write(f"file '{clip}'\n")
+
+        # Concatenate and cut exactly at audio duration
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", concat_file, "-c", "copy", concat_video
-        ], capture_output=True, timeout=120)
+            "-i", concat_file,
+            "-t", str(audio_duration),
+            "-c", "copy", concat_video
+        ], capture_output=True, timeout=300)
 
         if not os.path.exists(concat_video) or os.path.getsize(concat_video) < 1000:
             return {"error": "Video concatenation failed", "success": False}
 
-        # Generate SRT subtitle file from script
+        # Generate SRT subtitles
         srt_path = os.path.join(TEMP_DIR, "subtitles.srt")
         words    = STATE.script.split()
         chunk    = 8
@@ -395,7 +405,7 @@ def assemble_video():
                 f.write(f"{_fmt_time(start)} --> {_fmt_time(end)}\n")
                 f.write(f"{text}\n\n")
 
-        # Merge video + audio + subtitles into final MP4
+        # Merge video + audio + subtitles — use -t to enforce exact audio duration
         final_path = os.path.join(TEMP_DIR, "final_video.mp4")
         result = subprocess.run([
             "ffmpeg", "-y",
@@ -404,29 +414,98 @@ def assemble_video():
             "-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'",
             "-c:v", "libx264", "-preset", "fast",
             "-c:a", "aac",
-            "-t", str(audio_duration),            
+            "-t", str(audio_duration),
             final_path
         ], capture_output=True, timeout=300)
 
         if os.path.exists(final_path) and os.path.getsize(final_path) > 10000:
             STATE.final_video = final_path
             size_mb = os.path.getsize(final_path) / (1024 * 1024)
-            actual_duration = os.path.getsize(final_path) / (1024 * 1024 / 8)
-            print(f"[Assemble] Final video: {size_mb:.1f}MB")
-            return {"success": True, "video_path": final_path, "size_mb": round(size_mb, 1)}
+            print(f"[Assemble] Final video: {size_mb:.1f}MB, duration enforced: {audio_duration:.1f}s")
+            return {"success": True, "video_path": final_path, "size_mb": round(size_mb, 1), "duration_seconds": round(audio_duration)}
 
         stderr = result.stderr.decode("utf-8", errors="ignore")[-500:]
-        return {"error": f"FFmpeg final merge failed: {stderr}", "success": False}
+        return {"error": f"FFmpeg merge failed: {stderr}", "success": False}
 
     except Exception as e:
         return {"error": str(e), "success": False}
 
-def _fmt_time(seconds):
-    h  = int(seconds // 3600)
-    m  = int((seconds % 3600) // 60)
-    s  = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def generate_thumbnail():
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        W, H = 1280, 720
+        img  = Image.new("RGB", (W, H), (10, 15, 30))
+        draw = ImageDraw.Draw(img)
+
+        # Try to fetch a background photo from Pexels
+        bg_query = STATE.article_title.split()[0] if STATE.article_title else "home office"
+        try:
+            r = requests.get(
+                "https://api.pexels.com/photos/search",
+                headers={"Authorization": PEXELS_API_KEY},
+                params={"query": bg_query + " office", "per_page": 1, "orientation": "landscape"},
+                timeout=10
+            )
+            if r.status_code == 200 and r.json().get("photos"):
+                photo_url = r.json()["photos"][0]["src"]["large"]
+                pr = requests.get(photo_url, timeout=20)
+                if pr.status_code == 200:
+                    bg   = Image.open(BytesIO(pr.content)).convert("RGB")
+                    bg   = bg.resize((W, H))
+                    dark = Image.new("RGB", (W, H), (0, 0, 0))
+                    img  = Image.blend(bg, dark, alpha=0.6)
+                    draw = ImageDraw.Draw(img)
+                    print("[Thumbnail] Background image fetched")
+        except Exception as e:
+            print(f"[Thumbnail] Background fetch failed: {e}")
+
+        # Blue accent bar on left edge
+        draw.rectangle([0, 0, 14, H], fill=(37, 99, 235))
+
+        # Load fonts
+        font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+        font_reg  = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+        try:
+            font_big   = ImageFont.truetype(font_path, 76)
+            font_med   = ImageFont.truetype(font_path, 44)
+            font_small = ImageFont.truetype(font_reg,  30)
+        except Exception:
+            font_big = font_med = font_small = ImageFont.load_default()
+
+        # Wrap and draw title text
+        title = STATE.article_title[:70]
+        lines = textwrap.wrap(title, width=24)[:2]
+        y     = 160
+
+        for line in lines:
+            draw.text((92, y + 4), line, font=font_big, fill=(0, 0, 0))
+            draw.text((88, y),     line, font=font_big, fill=(255, 255, 255))
+            y += 96
+
+        # Blue underline accent
+        draw.rectangle([88, y + 8, min(88 + len(lines[0]) * 40, W - 60), y + 14], fill=(37, 99, 235))
+
+        # Subtitle
+        draw.text((88, y + 28), "Vollständiger Test auf heimbuero-test.de", font=font_small, fill=(150, 200, 255))
+
+        # Bottom right brand badge
+        badge_w = 380
+        badge_h = 62
+        bx = W - badge_w - 20
+        by = H - badge_h - 20
+        draw.rectangle([bx, by, W - 20, H - 20], fill=(37, 99, 235))
+        draw.text((bx + 16, by + 8), "HEIMBUERO TEST", font=font_med, fill=(255, 255, 255))
+
+        thumb_path = os.path.join(TEMP_DIR, "thumbnail.jpg")
+        img.save(thumb_path, "JPEG", quality=95)
+        STATE.thumbnail_path = thumb_path
+        print(f"[Thumbnail] Saved: {thumb_path}")
+        return {"success": True, "path": thumb_path}
+
+    except Exception as e:
+        return {"error": str(e), "success": False}
 
 
 def upload_to_youtube():
@@ -439,9 +518,8 @@ def upload_to_youtube():
         if not STATE.final_video or not os.path.exists(STATE.final_video):
             return {"error": "No video file to upload", "success": False}
 
-        # Load credentials from environment
         if not YOUTUBE_TOKEN_JSON:
-            return {"error": "YOUTUBE_TOKEN_JSON not set in environment", "success": False}
+            return {"error": "YOUTUBE_TOKEN_JSON not set", "success": False}
 
         token_data = json.loads(YOUTUBE_TOKEN_JSON)
         creds = Credentials(
@@ -453,14 +531,14 @@ def upload_to_youtube():
             scopes=["https://www.googleapis.com/auth/youtube.upload"]
         )
 
-        # Always refresh — token may be expired
         try:
             creds.refresh(Request())
+            print("[YouTube] Token refreshed successfully")
         except Exception as e:
-            print(f"Token refresh error: {e}")
+            print(f"[YouTube] Token refresh error: {e}")
+
         youtube = build("youtube", "v3", credentials=creds)
 
-        # Video metadata
         title       = f"{STATE.article_title} | Heimbuero Test"
         description = (
             f"{STATE.script}\n\n"
@@ -476,11 +554,11 @@ def upload_to_youtube():
 
         body = {
             "snippet": {
-                "title":       title[:100],
-                "description": description[:5000],
-                "tags":        tags,
-                "categoryId":  "28",  # Science & Technology
-                "defaultLanguage": "de",
+                "title":           title[:100],
+                "description":     description[:5000],
+                "tags":            tags,
+                "categoryId":      "28",
+                "defaultLanguage": "de"
             },
             "status": {
                 "privacyStatus":           "public",
@@ -492,23 +570,31 @@ def upload_to_youtube():
             STATE.final_video,
             mimetype="video/mp4",
             resumable=True,
-            chunksize=1024*1024*5
+            chunksize=1024 * 1024 * 5
         )
 
-        request = youtube.videos().insert(
-            part="snippet,status",
-            body=body,
-            media_body=media
-        )
-
+        request  = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
         response = None
         while response is None:
             status, response = request.next_chunk()
             if status:
-                print(f"Upload progress: {int(status.progress() * 100)}%")
+                print(f"[YouTube] Upload progress: {int(status.progress() * 100)}%")
 
         video_id  = response["id"]
         video_url = f"https://youtube.com/watch?v={video_id}"
+        print(f"[YouTube] Video live: {video_url}")
+
+        # Upload thumbnail if available
+        if STATE.thumbnail_path and os.path.exists(STATE.thumbnail_path):
+            try:
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=MediaFileUpload(STATE.thumbnail_path, mimetype="image/jpeg")
+                ).execute()
+                print("[YouTube] Thumbnail uploaded successfully")
+            except Exception as e:
+                print(f"[YouTube] Thumbnail upload failed: {e}")
+
         return {"success": True, "video_id": video_id, "url": video_url}
 
     except Exception as e:
@@ -538,6 +624,7 @@ def dispatch_tool(name, inputs):
         if name == "generate_voiceover":     return generate_voiceover()
         if name == "fetch_video_clips":      return fetch_video_clips(**inputs)
         if name == "assemble_video":         return assemble_video()
+        if name == "generate_thumbnail":     return generate_thumbnail()
         if name == "upload_to_youtube":      return upload_to_youtube()
         if name == "send_telegram_message":  return send_telegram_message(**inputs)
         return {"error": f"Unknown tool: {name}"}
@@ -551,33 +638,31 @@ SYSTEM_PROMPT = f"""You are an autonomous video creation agent for heimbuero-tes
 a German home office product review website.
 
 Today: {datetime.now().strftime('%d.%m.%Y')}
-Your goal: take a published article, create a 60-90 second German video, and upload it to YouTube.
+Goal: Take a published article, create a full-length German video, and upload to YouTube.
 
-YOUR EXACT WORKFLOW:
+YOUR EXACT WORKFLOW — follow this order strictly:
 
-1. get_latest_articles — see what articles are available
-2. Pick the most recent article that would make a good video
-3. fetch_article_content — load the full article
-4. generate_video_script — create a 60-90 second German script
-5. send_approval_request — send script to owner, wait for YES/NO
-6. If approved:
-   a. generate_voiceover — create German audio from script
-   b. WAIT for voiceover to complete before continuing
-   c. fetch_video_clips — search for relevant English stock footage
-      (translate topic: Bürostuhl=office chair, Schreibtisch=desk, etc.)
-   d. WAIT for all clips to download before continuing
-   e. assemble_video — combine clips + audio + subtitles into MP4 
-      ONLY call this after both voiceover AND clips are confirmed successful
-   f. upload_to_youtube — upload with full metadata
-   g. send_telegram_message — notify owner with YouTube URL
+1. get_latest_articles
+2. Pick the most recent article
+3. fetch_article_content
+4. generate_video_script
+5. send_approval_request — wait for YES or NO
+6. If approved, execute in this EXACT order:
+   a. generate_voiceover — wait for success:true before continuing
+   b. fetch_video_clips — wait for success:true before continuing
+   c. assemble_video — ONLY call after BOTH a and b return success:true
+   d. generate_thumbnail — call after assemble_video succeeds
+   e. upload_to_youtube — call after generate_thumbnail
+   f. send_telegram_message — notify owner with YouTube URL
 7. If not approved: send_telegram_message confirming skip, stop.
 
-RULES:
-- Never upload without approval
-- fetch_video_clips search query must be in English
-- Always fetch at least 3-4 video clips for variety
-- The video description must always include the article URL
-- Handle errors gracefully — if a tool fails, try once more then notify owner"""
+CRITICAL RULES:
+- NEVER call assemble_video until BOTH generate_voiceover AND fetch_video_clips return success:true
+- NEVER call upload_to_youtube without calling generate_thumbnail first
+- fetch_video_clips search query MUST be in English
+- Always fetch at least 3-4 video clips
+- Never upload without owner approval
+- Retry failed tools once before notifying owner"""
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
