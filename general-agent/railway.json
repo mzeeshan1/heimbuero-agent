@@ -3,7 +3,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python agent.py",
+    "startCommand": "python general-agent/agent.py",
     "restartPolicyType": "Never",
     "cronSchedule": "0 10 * * *"
   }
