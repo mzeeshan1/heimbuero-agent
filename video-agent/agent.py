@@ -261,17 +261,13 @@ def generate_voiceover():
             STATE.audio_path = audio_path
 
             # Get audio duration using ffprobe
-            result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries",
-                 "format=duration", "-of", "json", audio_path],
-                capture_output=True, text=True
-            )
+            # Estimate duration from file size (mp3 ~128kbps = 16KB/s)
             duration = 75  # default fallback
             try:
-                duration = float(json.loads(result.stdout)["format"]["duration"])
+                file_size = os.path.getsize(audio_path)
+                duration = file_size / 16000
             except Exception:
                 pass
-
             return {"success": True, "audio_path": audio_path, "duration_seconds": round(duration)}
         return {"error": f"ElevenLabs {r.status_code}: {r.text[:200]}", "success": False}
     except Exception as e:
