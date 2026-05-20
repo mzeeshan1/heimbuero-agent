@@ -268,6 +268,8 @@ def generate_voiceover():
                 duration = file_size / 16000
             except Exception:
                 pass
+
+
             return {"success": True, "audio_path": audio_path, "duration_seconds": round(duration)}
         return {"error": f"ElevenLabs {r.status_code}: {r.text[:200]}", "success": False}
     except Exception as e:
@@ -437,9 +439,11 @@ def upload_to_youtube():
             scopes=["https://www.googleapis.com/auth/youtube.upload"]
         )
 
-        if creds.expired and creds.refresh_token:
+        # Always refresh — token may be expired
+        try:
             creds.refresh(Request())
-
+        except Exception as e:
+            print(f"Token refresh error: {e}")
         youtube = build("youtube", "v3", credentials=creds)
 
         # Video metadata
