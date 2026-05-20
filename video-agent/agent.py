@@ -548,11 +548,14 @@ YOUR EXACT WORKFLOW:
 5. send_approval_request — send script to owner, wait for YES/NO
 6. If approved:
    a. generate_voiceover — create German audio from script
-   b. fetch_video_clips — search for relevant English stock footage
+   b. WAIT for voiceover to complete before continuing
+   c. fetch_video_clips — search for relevant English stock footage
       (translate topic: Bürostuhl=office chair, Schreibtisch=desk, etc.)
-   c. assemble_video — combine clips + audio + subtitles into MP4
-   d. upload_to_youtube — upload with full metadata
-   e. send_telegram_message — notify owner with YouTube URL
+   d. WAIT for all clips to download before continuing
+   e. assemble_video — combine clips + audio + subtitles into MP4 
+      ONLY call this after both voiceover AND clips are confirmed successful
+   f. upload_to_youtube — upload with full metadata
+   g. send_telegram_message — notify owner with YouTube URL
 7. If not approved: send_telegram_message confirming skip, stop.
 
 RULES:
