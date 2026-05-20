@@ -554,29 +554,30 @@ def upload_to_youtube():
 
         youtube = build("youtube", "v3", credentials=creds)
 
-        # Build links section from article links
+        # Build links section — each URL on its own line
         links_section = ""
         if STATE.affiliate_links:
-            links_section = "\n🛒 LINKS AUS DEM ARTIKEL:\n"
+            links_section = "🛒 LINKS AUS DEM ARTIKEL:\n"
             for link in STATE.affiliate_links:
                 links_section += f"▶ {link}\n"
 
-        title = f"{STATE.article_title} | Heimbuero Test"
-        # Build links section
-        links_section = ""
-        if STATE.affiliate_links:
-            links_section = "\n🛒 LINKS AUS DEM ARTIKEL:\n"
-            for link in STATE.affiliate_links:
-                links_section += f"▶ {link}\n"
-
-        # Keep script short in description to avoid truncation
+        # Keep script short to avoid truncation
         short_script = " ".join(STATE.script.split()[:80])
 
+        title = f"{STATE.article_title} | Heimbuero Test"
+
+        # Each URL on its own line so YouTube makes them clickable
         description = (
-            f"{short_script}\n\n"
-            f"📖 Vollständiger Test: {STATE.article_url}\n\n"
-            f"🏠 Mehr Homeoffice-Tipps: https://heimbuero-test.de\n\n"
-            f"{links_section}\n"
+            f"{short_script}\n"
+            f"\n"
+            f"📖 Vollständiger Test:\n"
+            f"{STATE.article_url}\n"
+            f"\n"
+            f"🏠 Mehr Homeoffice-Tipps:\n"
+            f"https://heimbuero-test.de\n"
+            f"\n"
+            f"{links_section}"
+            f"\n"
             f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )
 
@@ -633,7 +634,6 @@ def upload_to_youtube():
 
     except Exception as e:
         return {"error": str(e), "success": False}
-
 
 def send_telegram_message(message):
     try:
