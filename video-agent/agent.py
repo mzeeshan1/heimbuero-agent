@@ -219,7 +219,7 @@ def send_approval_request():
         return {"error": str(e)}
 
     for _ in range(24):
-        time.sleep(300)
+        time.sleep(30)
         try:
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
@@ -658,7 +658,8 @@ YOUR EXACT WORKFLOW — follow this order strictly:
 
 CRITICAL RULES:
 - NEVER call assemble_video until BOTH generate_voiceover AND fetch_video_clips return success:true
-- NEVER call upload_to_youtube without calling generate_thumbnail first
+- Always call generate_thumbnail before upload_to_youtube
+- If generate_thumbnail fails, proceed with upload_to_youtube anyway — thumbnail is optional
 - fetch_video_clips search query MUST be in English
 - Always fetch at least 3-4 video clips
 - Never upload without owner approval
