@@ -323,72 +323,81 @@ def fetch_video_clips(search_query):
 
 
 def assemble_video():
+    # Safety check 1 — audio must exist and be complete
+    if not STATE.audio_path or not os.path.exists(STATE.audio_path):
+        return {"error": "No audio file. generate_voiceover must complete first.", "success": False}
+
+    audio_size = os.path.getsize(STATE.audio_path)
+    if audio_size < 10000:
+        return {"error": "Audio file too small — voiceover may not have completed.", "success": False}
+
+    # Safety check 2 — clips must be downloaded and valid
+    valid_clips = [c for c in STATE.video_clips if os.path.exists(c) and os.path.getsize(c) > 10000]
+    if len(valid_clips) < 2:
+        return {"error": f"Not enough valid clips ({len(valid_clips)}). Wait for fetch_video_clips to complete first.", "success": False}
+    STATE.video_clips = valid_clips
+
     try:
-        if not STATE.audio_path or not os.path.exists(STATE.audio_path):
-            return {"error": "No audio file found. Generate voiceover first.", "success": False}
+        # Get audio duration from file size (mp3 ~16KB/s at 128kbps)
+        audio_duration = os.path.getsize(STATE.audio_path) / 16000
+        print(f"[Assemble] Audio duration estimate: {audio_duration:.1f}s, clips: {len(valid_clips)}")
 
-        if not STATE.video_clips:
-            return {"error": "No video clips found. Fetch clips first.", "success": False}
+        clip_duration = audio_duration / len(valid_clips)
 
-        # Get audio duration
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries",
-             "format=duration", "-of", "json", STATE.audio_path],
-            capture_output=True, text=True
-        )
-        audio_duration = 75.0
-        try:
-            audio_duration = float(json.loads(result.stdout)["format"]["duration"])
-        except Exception:
-            pass
-
-        # Create concat file for video clips
-        concat_file = os.path.join(TEMP_DIR, "concat.txt")
-        clip_duration = audio_duration / len(STATE.video_clips)
-
-        # Trim each clip to equal duration and write concat list
+        # Trim each clip to equal duration
         trimmed_clips = []
-        for i, clip in enumerate(STATE.video_clips):
+        for i, clip in enumerate(valid_clips):
             trimmed = os.path.join(TEMP_DIR, f"trimmed_{i}.mp4")
-            subprocess.run([
+            result = subprocess.run([
                 "ffmpeg", "-y", "-i", clip,
                 "-t", str(clip_duration),
                 "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
                 "-r", "25", "-c:v", "libx264", "-preset", "fast",
                 "-an", trimmed
             ], capture_output=True, timeout=120)
-            if os.path.exists(trimmed):
+            if os.path.exists(trimmed) and os.path.getsize(trimmed) > 1000:
                 trimmed_clips.append(trimmed)
+                print(f"[Assemble] Trimmed clip {i+1} to {clip_duration:.1f}s")
+            else:
+                print(f"[Assemble] Warning: clip {i+1} trim failed")
 
+        if not trimmed_clips:
+            return {"error": "All clip trimming failed", "success": False}
+
+        # Write concat file
+        concat_file = os.path.join(TEMP_DIR, "concat.txt")
         with open(concat_file, "w") as f:
             for clip in trimmed_clips:
                 f.write(f"file '{clip}'\n")
 
-        # Concatenate clips
+        # Concatenate clips into one video
         concat_video = os.path.join(TEMP_DIR, "concat_video.mp4")
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_file, "-c", "copy", concat_video
         ], capture_output=True, timeout=120)
 
-        # Generate subtitle file from script
+        if not os.path.exists(concat_video) or os.path.getsize(concat_video) < 1000:
+            return {"error": "Video concatenation failed", "success": False}
+
+        # Generate SRT subtitle file from script
         srt_path = os.path.join(TEMP_DIR, "subtitles.srt")
         words    = STATE.script.split()
         chunk    = 8
         chunks   = [" ".join(words[i:i+chunk]) for i in range(0, len(words), chunk)]
-        dur_each = audio_duration / len(chunks) if chunks else 3
+        dur_each = audio_duration / len(chunks) if chunks else 3.0
 
         with open(srt_path, "w", encoding="utf-8") as f:
             for idx, text in enumerate(chunks):
                 start = idx * dur_each
-                end   = start + dur_each
+                end   = min(start + dur_each, audio_duration)
                 f.write(f"{idx+1}\n")
                 f.write(f"{_fmt_time(start)} --> {_fmt_time(end)}\n")
                 f.write(f"{text}\n\n")
 
-        # Merge video + audio + subtitles
+        # Merge video + audio + subtitles into final MP4
         final_path = os.path.join(TEMP_DIR, "final_video.mp4")
-        subprocess.run([
+        result = subprocess.run([
             "ffmpeg", "-y",
             "-i", concat_video,
             "-i", STATE.audio_path,
@@ -398,14 +407,18 @@ def assemble_video():
             final_path
         ], capture_output=True, timeout=300)
 
-        if os.path.exists(final_path):
+        if os.path.exists(final_path) and os.path.getsize(final_path) > 10000:
             STATE.final_video = final_path
-            size_mb = os.path.getsize(final_path) / (1024*1024)
+            size_mb = os.path.getsize(final_path) / (1024 * 1024)
+            actual_duration = os.path.getsize(final_path) / (1024 * 1024 / 8)
+            print(f"[Assemble] Final video: {size_mb:.1f}MB")
             return {"success": True, "video_path": final_path, "size_mb": round(size_mb, 1)}
-        return {"error": "FFmpeg failed to produce output file", "success": False}
+
+        stderr = result.stderr.decode("utf-8", errors="ignore")[-500:]
+        return {"error": f"FFmpeg final merge failed: {stderr}", "success": False}
+
     except Exception as e:
         return {"error": str(e), "success": False}
-
 
 def _fmt_time(seconds):
     h  = int(seconds // 3600)
