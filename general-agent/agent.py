@@ -368,15 +368,18 @@ def write_article():
                         f"- Praxisnahe Tipps für Heimarbeiter in Deutschland\n"
                         f"- Beantworte häufige Fragen der Leser\n"
                         f"- Decke diese Aspekte ab die Konkurrenten vernachlässigen: {STATE.competitor_insights}\n"
-                        f"- Füge 3-5 Amazon.de Produktlinks ein:\n"
+                        f"- Füge 3-4 Amazon.de Produktlinks ein:\n"
                         f"  <a href='https://www.amazon.de/s?k=SUCHBEGRIFF&tag={AMAZON_TRACKING_ID}' "
                         f"rel='nofollow' target='_blank'>Produktname auf Amazon ansehen</a>\n"
                         f"- Ersetze SUCHBEGRIFF mit passendem deutschen Begriff\n"
+                        f"- Füge außerdem 1-2 OTTO Links ein wo es passt:\n"
+                        f"  Für allgemeine Produkte: <a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>Passende Produkte bei OTTO ansehen</a>\n"
+                        f"  Für Büroausstattung: <a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>Bürobedarf bei OTTO Office ansehen</a>\n"
                         f"- Professioneller aber freundlicher Ton\n"
                         f"- Reines HTML mit H1/H2/H3 Tags\n"
-                        f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html"
+                        f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html\n"
                         f"- Kein Affiliate-Disclaimer, kein Hinweis-Text am Ende des Artikels"
-                    )
+                    )                
                 }]
             },
             timeout=120

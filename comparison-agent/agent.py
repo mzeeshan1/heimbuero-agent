@@ -344,6 +344,8 @@ def fetch_image():
             "Headset": "wireless headset home office",
             "Drucker": "office printer",
             "Laptop Ständer": "laptop stand desk setup",
+            "Laptop": "office laptop"
+            
         }
         query = english_map.get(STATE.category, f"{STATE.category} home office")
         print(f"[Image] Searching Unsplash for: {query}")
@@ -416,11 +418,14 @@ def write_comparison_article():
                         f"- Füge für jedes Produkt einen Amazon-Affiliate-Link ein:\n"
                         f"{amazon_links}\n"
                         f"  Format: <a href='LINK' rel='nofollow' target='_blank'>PRODUKTNAME auf Amazon ansehen</a>\n"
+                        f"- Füge außerdem 1-2 OTTO Links ein wo es passt:\n"
+                        f"  Für allgemeine Produkte: <a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>Passende Produkte bei OTTO ansehen</a>\n"
+                        f"  Für Büroausstattung: <a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>Bürobedarf bei OTTO Office ansehen</a>\n"
                         f"- Professioneller, vertrauenswürdiger Ton\n"
                         f"- Reines HTML mit H1/H2/H3, Tabellen, Listen\n"
                         f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html\n"
                         f"- Kein Affiliate-Disclaimer am Ende"
-                    )
+                    )                
                 }]
             },
             timeout=180
