@@ -564,21 +564,27 @@ def upload_to_youtube():
         # Keep script short to avoid truncation
         short_script = " ".join(STATE.script.split()[:80])
 
+        # Build affiliate links — one per line, no prefix text
+        links_section = ""
+        if STATE.affiliate_links:
+            links_section = "Produkt-Links:\n"
+            for link in STATE.affiliate_links:
+                links_section += f"{link}\n"
+
         title = f"{STATE.article_title} | Heimbuero Test"
 
-        # Each URL on its own line so YouTube makes them clickable
         description = (
             f"{short_script}\n"
             f"\n"
-            f"📖 Vollständiger Test:\n"
+            f"Vollstaendiger Test:\n"
             f"{STATE.article_url}\n"
             f"\n"
-            f"🏠 Mehr Homeoffice-Tipps:\n"
+            f"Mehr Homeoffice-Tipps:\n"
             f"https://heimbuero-test.de\n"
             f"\n"
             f"{links_section}"
             f"\n"
-            f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
+            f"#Homeoffice #Buero #Test #Deutschland #Heimarbeit"
         )
 
         tags = [
