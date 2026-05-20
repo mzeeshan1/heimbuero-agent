@@ -3,9 +3,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python agent.py",
+    "startCommand": "python agent-comparison-articles.py",
     "restartPolicyType": "Never",
-    "cronSchedule": "0 8 * * *"
-
+    "cronSchedule": "0 10 * * *"
   }
 }
