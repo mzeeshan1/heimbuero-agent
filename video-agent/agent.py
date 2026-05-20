@@ -403,7 +403,8 @@ def assemble_video():
             "-i", STATE.audio_path,
             "-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'",
             "-c:v", "libx264", "-preset", "fast",
-            "-c:a", "aac", "-shortest",
+            "-c:a", "aac",
+            "-t", str(audio_duration),            
             final_path
         ], capture_output=True, timeout=300)
 
