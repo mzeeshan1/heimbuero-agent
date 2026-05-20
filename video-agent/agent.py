@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import tempfile
 import requests
@@ -30,6 +31,7 @@ class VideoState:
         self.article_title   = ""
         self.article_url     = ""
         self.article_content = ""
+        self.affiliate_links = []
         self.script          = ""
         self.audio_path      = ""
         self.audio_duration  = 0.0
@@ -49,7 +51,7 @@ TOOLS = [
     },
     {
         "name": "fetch_article_content",
-        "description": "Fetches the full content of a specific WordPress article by title and URL.",
+        "description": "Fetches the full content and all external links of a specific WordPress article.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -92,12 +94,12 @@ TOOLS = [
     },
     {
         "name": "generate_thumbnail",
-        "description": "Generates a catchy branded YouTube thumbnail with title text and background image. Call after assemble_video and before upload_to_youtube.",
+        "description": "Generates a catchy branded YouTube thumbnail. Call after assemble_video. If it fails proceed to upload anyway.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "upload_to_youtube",
-        "description": "Uploads the final video and thumbnail to YouTube with full metadata. Returns the live YouTube URL.",
+        "description": "Uploads the final video and thumbnail to YouTube with full metadata including article links. Returns the live YouTube URL.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
@@ -150,13 +152,38 @@ def fetch_article_content(article_url, article_title):
         if r.status_code == 200 and r.json():
             post = r.json()[0]
             raw  = post["content"]["rendered"]
-            import re
+
+            # Extract all external links from article HTML
+            all_links = re.findall(r'href=[\'\"](https?://[^\'\"]+)[\'\"]', raw)
+
+            # Skip internal and non-affiliate links
+            skip = [
+                "heimbuero-test.de", "unsplash.com", "wordpress.org",
+                "wp-content", "wp-admin", "gravatar.com"
+            ]
+            unique_links = []
+            seen = set()
+            for link in all_links:
+                if link not in seen and not any(s in link for s in skip):
+                    seen.add(link)
+                    unique_links.append(link)
+
+            STATE.affiliate_links = unique_links[:10]
+
+            # Plain text content
             text = re.sub(r"<[^>]+>", " ", raw)
             text = re.sub(r"\s+", " ", text).strip()[:3000]
+
             STATE.article_title   = article_title
             STATE.article_url     = article_url
             STATE.article_content = text
-            return {"success": True, "title": article_title, "length": len(text)}
+
+            return {
+                "success":         True,
+                "title":           article_title,
+                "length":          len(text),
+                "links_found":     len(unique_links)
+            }
         return {"error": "Article not found", "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
@@ -182,7 +209,7 @@ def generate_video_script():
                         f"- Mit einem starken Hook beginnen (Frage oder überraschende Aussage)\n"
                         f"- 3 wichtigste Erkenntnisse nennen\n"
                         f"- Konkrete Produktempfehlungen erwähnen\n"
-                        f"- Mit Call-to-Action enden: 'Den vollständigen Test findest du auf heimbuero-test.de'\n"
+                        f"- Mit Call-to-Action enden: 'Alle Links findest du in der Videobeschreibung und den vollständigen Test auf heimbuero-test.de'\n"
                         f"- Natürlich und gesprächig klingen\n"
                         f"- Maximal 200 Wörter\n"
                         f"- KEIN [Pause] oder Regieanweisungen — nur reiner Sprechtext\n\n"
@@ -258,8 +285,8 @@ def generate_voiceover():
         if r.status_code == 200:
             with open(audio_path, "wb") as f:
                 f.write(r.content)
-            STATE.audio_path = audio_path
-            duration = os.path.getsize(audio_path) / 16000
+            STATE.audio_path     = audio_path
+            duration             = os.path.getsize(audio_path) / 16000
             STATE.audio_duration = duration
             print(f"[Voiceover] Saved {os.path.getsize(audio_path)} bytes, ~{duration:.1f}s")
             return {"success": True, "audio_path": audio_path, "duration_seconds": round(duration)}
@@ -307,8 +334,6 @@ def fetch_video_clips(search_query):
                 if file_size > 10000:
                     downloaded.append(clip_path)
                     print(f"[Video] Downloaded clip {i+1}: {file_size//1024}KB")
-                else:
-                    print(f"[Video] Clip {i+1} too small, skipping")
 
         STATE.video_clips = downloaded
         return {"success": True, "clips_downloaded": len(downloaded), "paths": downloaded}
@@ -325,28 +350,25 @@ def _fmt_time(seconds):
 
 
 def assemble_video():
-    # Safety check 1 — audio must exist and be complete
     if not STATE.audio_path or not os.path.exists(STATE.audio_path):
         return {"error": "No audio file. generate_voiceover must complete first.", "success": False}
 
     audio_size = os.path.getsize(STATE.audio_path)
     if audio_size < 10000:
-        return {"error": "Audio file too small — voiceover may not have completed.", "success": False}
+        return {"error": "Audio file too small.", "success": False}
 
-    # Safety check 2 — clips must be fully downloaded
     valid_clips = [c for c in STATE.video_clips if os.path.exists(c) and os.path.getsize(c) > 10000]
     if len(valid_clips) < 2:
-        return {"error": f"Only {len(valid_clips)} valid clips — need at least 2. Wait for fetch_video_clips to complete.", "success": False}
+        return {"error": f"Only {len(valid_clips)} valid clips — need at least 2.", "success": False}
     STATE.video_clips = valid_clips
 
     try:
         audio_duration = STATE.audio_duration if STATE.audio_duration > 0 else audio_size / 16000
-        print(f"[Assemble] Audio duration: {audio_duration:.1f}s, clips: {len(valid_clips)}")
+        print(f"[Assemble] Audio: {audio_duration:.1f}s, clips: {len(valid_clips)}")
 
-        # Each clip gets equal share of audio duration
         clip_duration = audio_duration / len(valid_clips)
 
-        # Trim each clip to its share
+        # Trim each clip
         trimmed_clips = []
         for i, clip in enumerate(valid_clips):
             trimmed = os.path.join(TEMP_DIR, f"trimmed_{i}.mp4")
@@ -360,18 +382,15 @@ def assemble_video():
             if os.path.exists(trimmed) and os.path.getsize(trimmed) > 1000:
                 trimmed_clips.append(trimmed)
                 print(f"[Assemble] Trimmed clip {i+1} to {clip_duration:.1f}s")
-            else:
-                print(f"[Assemble] Warning: clip {i+1} trim failed")
 
         if not trimmed_clips:
             return {"error": "All clip trimming failed", "success": False}
 
-        # Calculate how many loops needed to exceed audio duration
-        single_pass_duration = len(trimmed_clips) * clip_duration
-        loops_needed = int(audio_duration / single_pass_duration) + 2
+        # Loop clips to cover full audio duration
+        single_pass = len(trimmed_clips) * clip_duration
+        loops_needed = int(audio_duration / single_pass) + 2
         print(f"[Assemble] Looping {len(trimmed_clips)} clips x{loops_needed} to cover {audio_duration:.1f}s")
 
-        # Write concat file with enough loops to always exceed audio duration
         concat_file  = os.path.join(TEMP_DIR, "concat.txt")
         concat_video = os.path.join(TEMP_DIR, "concat_video.mp4")
         with open(concat_file, "w") as f:
@@ -379,7 +398,6 @@ def assemble_video():
                 for clip in trimmed_clips:
                     f.write(f"file '{clip}'\n")
 
-        # Concatenate and cut exactly at audio duration
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_file,
@@ -390,7 +408,7 @@ def assemble_video():
         if not os.path.exists(concat_video) or os.path.getsize(concat_video) < 1000:
             return {"error": "Video concatenation failed", "success": False}
 
-        # Generate SRT subtitles
+        # Generate subtitles
         srt_path = os.path.join(TEMP_DIR, "subtitles.srt")
         words    = STATE.script.split()
         chunk    = 8
@@ -405,7 +423,7 @@ def assemble_video():
                 f.write(f"{_fmt_time(start)} --> {_fmt_time(end)}\n")
                 f.write(f"{text}\n\n")
 
-        # Merge video + audio + subtitles — use -t to enforce exact audio duration
+        # Final merge
         final_path = os.path.join(TEMP_DIR, "final_video.mp4")
         result = subprocess.run([
             "ffmpeg", "-y",
@@ -421,7 +439,7 @@ def assemble_video():
         if os.path.exists(final_path) and os.path.getsize(final_path) > 10000:
             STATE.final_video = final_path
             size_mb = os.path.getsize(final_path) / (1024 * 1024)
-            print(f"[Assemble] Final video: {size_mb:.1f}MB, duration enforced: {audio_duration:.1f}s")
+            print(f"[Assemble] Final video: {size_mb:.1f}MB, {audio_duration:.1f}s")
             return {"success": True, "video_path": final_path, "size_mb": round(size_mb, 1), "duration_seconds": round(audio_duration)}
 
         stderr = result.stderr.decode("utf-8", errors="ignore")[-500:]
@@ -439,7 +457,7 @@ def generate_thumbnail():
         img  = Image.new("RGB", (W, H), (10, 15, 30))
         draw = ImageDraw.Draw(img)
 
-        # Try to fetch a background photo from Pexels
+        # Try to fetch background photo from Pexels
         bg_query = STATE.article_title.split()[0] if STATE.article_title else "home office"
         try:
             r = requests.get(
@@ -457,14 +475,14 @@ def generate_thumbnail():
                     dark = Image.new("RGB", (W, H), (0, 0, 0))
                     img  = Image.blend(bg, dark, alpha=0.6)
                     draw = ImageDraw.Draw(img)
-                    print("[Thumbnail] Background image fetched")
+                    print("[Thumbnail] Background fetched")
         except Exception as e:
-            print(f"[Thumbnail] Background fetch failed: {e}")
+            print(f"[Thumbnail] Background failed: {e}")
 
-        # Blue accent bar on left edge
+        # Blue left accent bar
         draw.rectangle([0, 0, 14, H], fill=(37, 99, 235))
 
-        # Load fonts
+        # Fonts
         font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
         font_reg  = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
         try:
@@ -474,27 +492,24 @@ def generate_thumbnail():
         except Exception:
             font_big = font_med = font_small = ImageFont.load_default()
 
-        # Wrap and draw title text
+        # Title text
         title = STATE.article_title[:70]
         lines = textwrap.wrap(title, width=24)[:2]
         y     = 160
-
         for line in lines:
             draw.text((92, y + 4), line, font=font_big, fill=(0, 0, 0))
             draw.text((88, y),     line, font=font_big, fill=(255, 255, 255))
             y += 96
 
-        # Blue underline accent
+        # Blue underline
         draw.rectangle([88, y + 8, min(88 + len(lines[0]) * 40, W - 60), y + 14], fill=(37, 99, 235))
 
         # Subtitle
         draw.text((88, y + 28), "Vollständiger Test auf heimbuero-test.de", font=font_small, fill=(150, 200, 255))
 
-        # Bottom right brand badge
-        badge_w = 380
-        badge_h = 62
-        bx = W - badge_w - 20
-        by = H - badge_h - 20
+        # Brand badge
+        bx = W - 400
+        by = H - 82
         draw.rectangle([bx, by, W - 20, H - 20], fill=(37, 99, 235))
         draw.text((bx + 16, by + 8), "HEIMBUERO TEST", font=font_med, fill=(255, 255, 255))
 
@@ -533,19 +548,38 @@ def upload_to_youtube():
 
         try:
             creds.refresh(Request())
-            print("[YouTube] Token refreshed successfully")
+            print("[YouTube] Token refreshed")
         except Exception as e:
             print(f"[YouTube] Token refresh error: {e}")
 
         youtube = build("youtube", "v3", credentials=creds)
 
-        title       = f"{STATE.article_title} | Heimbuero Test"
+        # Build links section from article links
+        links_section = ""
+        if STATE.affiliate_links:
+            links_section = "\n🛒 LINKS AUS DEM ARTIKEL:\n"
+            for link in STATE.affiliate_links:
+                links_section += f"▶ {link}\n"
+
+        title = f"{STATE.article_title} | Heimbuero Test"
+        # Build links section
+        links_section = ""
+        if STATE.affiliate_links:
+            links_section = "\n🛒 LINKS AUS DEM ARTIKEL:\n"
+            for link in STATE.affiliate_links:
+                links_section += f"▶ {link}\n"
+
+        # Keep script short in description to avoid truncation
+        short_script = " ".join(STATE.script.split()[:80])
+
         description = (
-            f"{STATE.script}\n\n"
+            f"{short_script}\n\n"
             f"📖 Vollständiger Test: {STATE.article_url}\n\n"
             f"🏠 Mehr Homeoffice-Tipps: https://heimbuero-test.de\n\n"
+            f"{links_section}\n"
             f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )
+
         tags = [
             "Homeoffice", "Büro", "Test", "Vergleich", "Deutschland",
             "Heimarbeit", "Bürostuhl", "Monitor", "Schreibtisch",
@@ -578,11 +612,11 @@ def upload_to_youtube():
         while response is None:
             status, response = request.next_chunk()
             if status:
-                print(f"[YouTube] Upload progress: {int(status.progress() * 100)}%")
+                print(f"[YouTube] Upload: {int(status.progress() * 100)}%")
 
         video_id  = response["id"]
         video_url = f"https://youtube.com/watch?v={video_id}"
-        print(f"[YouTube] Video live: {video_url}")
+        print(f"[YouTube] Live: {video_url}")
 
         # Upload thumbnail if available
         if STATE.thumbnail_path and os.path.exists(STATE.thumbnail_path):
@@ -591,9 +625,9 @@ def upload_to_youtube():
                     videoId=video_id,
                     media_body=MediaFileUpload(STATE.thumbnail_path, mimetype="image/jpeg")
                 ).execute()
-                print("[YouTube] Thumbnail uploaded successfully")
+                print("[YouTube] Thumbnail uploaded")
             except Exception as e:
-                print(f"[YouTube] Thumbnail upload failed: {e}")
+                print(f"[YouTube] Thumbnail failed: {e}")
 
         return {"success": True, "video_id": video_id, "url": video_url}
 
@@ -651,17 +685,16 @@ YOUR EXACT WORKFLOW — follow this order strictly:
    a. generate_voiceover — wait for success:true before continuing
    b. fetch_video_clips — wait for success:true before continuing
    c. assemble_video — ONLY call after BOTH a and b return success:true
-   d. generate_thumbnail — call after assemble_video succeeds
-   e. upload_to_youtube — call after generate_thumbnail
+   d. generate_thumbnail — call after assemble_video (if it fails, continue anyway)
+   e. upload_to_youtube — call after generate_thumbnail attempt
    f. send_telegram_message — notify owner with YouTube URL
 7. If not approved: send_telegram_message confirming skip, stop.
 
 CRITICAL RULES:
 - NEVER call assemble_video until BOTH generate_voiceover AND fetch_video_clips return success:true
-- Always call generate_thumbnail before upload_to_youtube
-- If generate_thumbnail fails, proceed with upload_to_youtube anyway — thumbnail is optional
 - fetch_video_clips search query MUST be in English
 - Always fetch at least 3-4 video clips
+- generate_thumbnail failure is NOT a reason to stop — proceed to upload_to_youtube anyway
 - Never upload without owner approval
 - Retry failed tools once before notifying owner"""
 
