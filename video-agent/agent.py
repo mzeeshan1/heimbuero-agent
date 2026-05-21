@@ -8,6 +8,8 @@ import subprocess
 import textwrap
 from datetime import datetime
 from io import BytesIO
+from bs4 import BeautifulSoup
+
 
 # ── Environment variables ──────────────────────────────────────────────────────
 ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY")
@@ -153,34 +155,38 @@ def fetch_article_content(article_url, article_title):
             post = r.json()[0]
             raw  = post["content"]["rendered"]
 
-            # Extract all external links from article HTML
-            all_links = re.findall(r'href=[\'\"](https?://[^\'\"]+)[\'\"]', raw)
+            # Parse HTML properly
+            soup = BeautifulSoup(raw, "html.parser")
 
-            # Skip internal and non-affiliate links
+            all_links = []
+
+            # Extract REAL href URLs
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+
+                if href.startswith("http"):
+                    all_links.append(href)
+
+            # Skip internal links
             skip = [
-                "heimbuero-test.de", "unsplash.com", "wordpress.org",
-                "wp-content", "wp-admin", "gravatar.com"
+                "heimbuero-test.de",
+                "unsplash.com",
+                "wordpress.org",
+                "wp-content",
+                "wp-admin",
+                "gravatar.com"
             ]
+
             unique_links = []
             seen = set()
+
             for link in all_links:
                 if link not in seen and not any(s in link for s in skip):
                     seen.add(link)
                     unique_links.append(link)
 
-            clean_links = []
-
-            for link in unique_links:
-                link = link.strip()
-
-                if link.startswith("http://"):
-                    link = link.replace("http://", "https://")
-
-                if link.startswith("https://"):
-                    clean_links.append(link)
-
-            STATE.affiliate_links = clean_links[:10]
-
+            # Store clean full URLs
+            STATE.affiliate_links = unique_links[:10]
             # Plain text content
             text = re.sub(r"<[^>]+>", " ", raw)
             text = re.sub(r"\s+", " ", text).strip()[:3000]
