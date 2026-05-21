@@ -168,7 +168,18 @@ def fetch_article_content(article_url, article_title):
                     seen.add(link)
                     unique_links.append(link)
 
-            STATE.affiliate_links = unique_links[:10]
+            clean_links = []
+
+            for link in unique_links:
+                link = link.strip()
+
+                if link.startswith("http://"):
+                    link = link.replace("http://", "https://")
+
+                if link.startswith("https://"):
+                    clean_links.append(link)
+
+            STATE.affiliate_links = clean_links[:10]
 
             # Plain text content
             text = re.sub(r"<[^>]+>", " ", raw)
@@ -537,6 +548,7 @@ def upload_to_youtube():
             return {"error": "YOUTUBE_TOKEN_JSON not set", "success": False}
 
         token_data = json.loads(YOUTUBE_TOKEN_JSON)
+
         creds = Credentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
@@ -554,56 +566,116 @@ def upload_to_youtube():
 
         youtube = build("youtube", "v3", credentials=creds)
 
-        # Build links section — each URL on its own line
-        links_section = ""
-        if STATE.affiliate_links:
-            links_section = "🛒 LINKS AUS DEM ARTIKEL:\n"
-            for link in STATE.affiliate_links:
-                links_section += f"▶ {link}\n"
+        # ─────────────────────────────────────────────────────────────
+        # CLEAN AFFILIATE LINKS
+        # ─────────────────────────────────────────────────────────────
 
-        # Keep script short to avoid truncation
+        clean_links = []
+        seen = set()
+
+        for link in STATE.affiliate_links:
+            if not link:
+                continue
+
+            link = link.strip()
+
+            # Ensure https
+            if link.startswith("http://"):
+                link = link.replace("http://", "https://")
+
+            # Remove whitespace
+            link = re.sub(r"\s+", "", link)
+
+            # Skip invalid URLs
+            if not link.startswith("https://"):
+                continue
+
+            # Remove some tracking garbage
+            link = link.split("#")[0]
+
+            # Avoid duplicates
+            if link not in seen:
+                seen.add(link)
+                clean_links.append(link)
+
+        # ─────────────────────────────────────────────────────────────
+        # SHORT SCRIPT
+        # ─────────────────────────────────────────────────────────────
+
         short_script = " ".join(STATE.script.split()[:80])
 
-        # Build affiliate links — one per line, no prefix text
-        links_section = ""
-        if STATE.affiliate_links:
-            links_section = "Produkt-Links:\n"
-            for link in STATE.affiliate_links:
-                links_section += f"{link}\n"
+        # ─────────────────────────────────────────────────────────────
+        # BUILD PRODUCT LINKS SECTION
+        # ─────────────────────────────────────────────────────────────
 
-        title = f"{STATE.article_title} | Heimbuero Test"
+        links_section = ""
+
+        if clean_links:
+            links_section += "Produkt-Links:\n\n"
+
+            for link in clean_links:
+                links_section += f"{link}\n\n"
+
+        # ─────────────────────────────────────────────────────────────
+        # DESCRIPTION
+        # IMPORTANT: LINKS FIRST
+        # ─────────────────────────────────────────────────────────────
 
         description = (
-            f"{short_script}\n"
-            f"\n"
             f"Vollstaendiger Test:\n"
-            f"{STATE.article_url}\n"
-            f"\n"
-            f"Mehr Homeoffice-Tipps:\n"
-            f"https://heimbuero-test.de/\n"
+            f"{STATE.article_url}\n\n"
 
-            f"\n"
+            f"Mehr Homeoffice-Tipps:\n"
+            f"https://heimbuero-test.de/\n\n"
+
             f"{links_section}"
-            f"\n"
+
+            f"{short_script}\n\n"
+
             f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )
 
+        # ─────────────────────────────────────────────────────────────
+        # SAFE DESCRIPTION LIMIT
+        # NEVER CUT URLS
+        # ─────────────────────────────────────────────────────────────
+
+        MAX_DESC = 7900
+
+        if len(description) > MAX_DESC:
+            description = description[:MAX_DESC]
+
+            # Cut safely at last newline
+            last_newline = description.rfind("\n")
+
+            if last_newline != -1:
+                description = description[:last_newline]
+
+        title = f"{STATE.article_title} | Heimbuero Test"
+
         tags = [
-            "Homeoffice", "Büro", "Test", "Vergleich", "Deutschland",
-            "Heimarbeit", "Bürostuhl", "Monitor", "Schreibtisch",
+            "Homeoffice",
+            "Büro",
+            "Test",
+            "Vergleich",
+            "Deutschland",
+            "Heimarbeit",
+            "Bürostuhl",
+            "Monitor",
+            "Schreibtisch",
             STATE.article_title
         ]
 
         body = {
             "snippet": {
-                "title":           title[:100],
-                "description":     description[:8000],
-                "tags":            tags,
-                "categoryId":      "28",
+                "title": title[:100],
+                "description": description,
+                "tags": tags,
+                "categoryId": "28",
                 "defaultLanguage": "de"
             },
             "status": {
-                "privacyStatus":           "public",
+                "privacyStatus": "public",
                 "selfDeclaredMadeForKids": False
             }
         }
@@ -615,32 +687,56 @@ def upload_to_youtube():
             chunksize=1024 * 1024 * 5
         )
 
-        request  = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        request = youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media
+        )
+
         response = None
+
         while response is None:
             status, response = request.next_chunk()
+
             if status:
                 print(f"[YouTube] Upload: {int(status.progress() * 100)}%")
 
-        video_id  = response["id"]
+        video_id = response["id"]
         video_url = f"https://youtube.com/watch?v={video_id}"
+
         print(f"[YouTube] Live: {video_url}")
 
-        # Upload thumbnail if available
+        # ─────────────────────────────────────────────────────────────
+        # THUMBNAIL
+        # ─────────────────────────────────────────────────────────────
+
         if STATE.thumbnail_path and os.path.exists(STATE.thumbnail_path):
             try:
                 youtube.thumbnails().set(
                     videoId=video_id,
-                    media_body=MediaFileUpload(STATE.thumbnail_path, mimetype="image/jpeg")
+                    media_body=MediaFileUpload(
+                        STATE.thumbnail_path,
+                        mimetype="image/jpeg"
+                    )
                 ).execute()
+
                 print("[YouTube] Thumbnail uploaded")
+
             except Exception as e:
                 print(f"[YouTube] Thumbnail failed: {e}")
 
-        return {"success": True, "video_id": video_id, "url": video_url}
+        return {
+            "success": True,
+            "video_id": video_id,
+            "url": video_url
+        }
 
     except Exception as e:
-        return {"error": str(e), "success": False}
+        return {
+            "error": str(e),
+            "success": False
+        }
+
 
 def send_telegram_message(message):
     try:
