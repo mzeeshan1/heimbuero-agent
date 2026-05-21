@@ -580,11 +580,12 @@ def upload_to_youtube():
             f"{STATE.article_url}\n"
             f"\n"
             f"Mehr Homeoffice-Tipps:\n"
-            f"https://heimbuero-test.de\n"
+            f"https://heimbuero-test.de/\n"
+
             f"\n"
             f"{links_section}"
             f"\n"
-            f"#Homeoffice #Buero #Test #Deutschland #Heimarbeit"
+            f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )
 
         tags = [
@@ -596,7 +597,7 @@ def upload_to_youtube():
         body = {
             "snippet": {
                 "title":           title[:100],
-                "description":     description[:5000],
+                "description":     description[:8000],
                 "tags":            tags,
                 "categoryId":      "28",
                 "defaultLanguage": "de"
