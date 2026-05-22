@@ -14,6 +14,7 @@ WP_APP_PASSWORD     = os.environ.get("WP_APP_PASSWORD")
 AMAZON_TRACKING_ID  = os.environ.get("AMAZON_TRACKING_ID")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 SERPAPI_KEY         = os.environ.get("SERPAPI_KEY")
+WP_CATEGORY_ID      = int(os.environ.get("WP_CATEGORY_ID", "4"))
 
 MAX_ITERATIONS = 24
 
@@ -305,6 +306,19 @@ def send_approval_request():
         f"<b>Gliederung:</b>\n{STATE.outline}\n\n"
         f"Mit <b>YES</b> bestätigen oder <b>NO</b> ablehnen."
     )
+
+    last_update_id = 0
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params={"offset": -1}, timeout=10
+        ).json()
+        results = r.get("result", [])
+        if results:
+            last_update_id = results[-1]["update_id"]
+    except Exception:
+        pass
+
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -312,18 +326,18 @@ def send_approval_request():
             timeout=10
         )
     except Exception as e:
-        return {"error": str(e)}
+        print(f"Telegram send error: {e}")
 
     for _ in range(24):
         time.sleep(300)
         try:
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                params={"offset": -1}, timeout=10
+                params={"offset": last_update_id + 1}, timeout=10
             ).json()
-            results = r.get("result", [])
-            if results:
-                text = results[-1].get("message", {}).get("text", "").strip().upper()
+            for update in r.get("result", []):
+                last_update_id = max(last_update_id, update["update_id"])
+                text = update.get("message", {}).get("text", "").strip().upper()
                 if text == "YES":
                     return {"approved": True}
                 elif text == "NO":
@@ -452,21 +466,12 @@ def publish_article():
                 "title":      STATE.comparison_title,
                 "content":    full_content,
                 "status":     "publish",
-                "categories": [4]
+                "categories": [WP_CATEGORY_ID]
             },
             timeout=30
         )
         if r.status_code == 201:
             link = r.json().get("link", "")
-            try:
-                requests.post(
-                    "https://indexing.googleapis.com/v3/urlNotifications:publish",
-                    headers={"Content-Type": "application/json"},
-                    json={"url": link, "type": "URL_UPDATED"},
-                    timeout=10
-                )
-            except Exception:
-                pass
             return {"success": True, "link": link}
         return {"success": False, "status": r.status_code, "body": r.text[:300]}
     except Exception as e:
@@ -506,7 +511,8 @@ def dispatch_tool(name, inputs):
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = f"""You are an autonomous comparison article agent for heimbuero-test.de,
+def _system_prompt():
+    return f"""You are an autonomous comparison article agent for heimbuero-test.de,
 a German home office product review website. You compare products from well known companies
 which manufacture home office products. 
 
@@ -554,10 +560,12 @@ COMPARISON ARTICLE RULES:
 
 def run_agent():
     print(f"[{datetime.now()}] Comparison Agent starting...")
+    system_prompt = _system_prompt()
+
     messages = [{
         "role": "user",
         "content": (
-            f"Publish article for today"
+            f"Publish article for today. "
             f"Today is {datetime.now().strftime('%d.%m.%Y %H:%M')}. "
             f"Start by checking published articles, then research and pick the best comparison."
         )
@@ -566,13 +574,14 @@ def run_agent():
     for iteration in range(MAX_ITERATIONS):
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
-                        headers={"x-api-key": ANTHROPIC_API_KEY,
+            headers={"x-api-key": ANTHROPIC_API_KEY,
                      "anthropic-version": "2023-06-01",
+                     "anthropic-beta": "prompt-caching-2024-07-31",
                      "content-type": "application/json"},
             json={
                 "model":      "claude-sonnet-4-6",
                 "max_tokens": 8000,
-                "system":     SYSTEM_PROMPT,
+                "system":     [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":      TOOLS,
                 "messages":   messages
             },

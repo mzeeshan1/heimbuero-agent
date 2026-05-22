@@ -1,6 +1,8 @@
+import atexit
 import os
 import json
 import re
+import shutil
 import time
 import tempfile
 import requests
@@ -22,9 +24,13 @@ YOUTUBE_CLIENT_ID     = os.environ.get("YOUTUBE_CLIENT_ID")
 YOUTUBE_CLIENT_SECRET = os.environ.get("YOUTUBE_CLIENT_SECRET")
 YOUTUBE_TOKEN_JSON    = os.environ.get("YOUTUBE_TOKEN_JSON")
 WP_URL                = os.environ.get("WP_URL")
+INSTAGRAM_USER_ID     = os.environ.get("INSTAGRAM_USER_ID")
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+TIKTOK_ACCESS_TOKEN   = os.environ.get("TIKTOK_ACCESS_TOKEN")
 
 MAX_ITERATIONS = 18
 TEMP_DIR       = tempfile.mkdtemp()
+atexit.register(shutil.rmtree, TEMP_DIR, ignore_errors=True)
 
 
 # ── Agent state ────────────────────────────────────────────────────────────────
@@ -39,6 +45,7 @@ class VideoState:
         self.audio_duration  = 0.0
         self.video_clips     = []
         self.final_video     = ""
+        self.vertical_video  = ""
         self.thumbnail_path  = ""
 
 STATE = VideoState()
@@ -96,12 +103,27 @@ TOOLS = [
     },
     {
         "name": "generate_thumbnail",
-        "description": "Generates a catchy branded YouTube thumbnail. Call after assemble_video. If it fails proceed to upload anyway.",
+        "description": "Generates a catchy branded YouTube thumbnail. Call after assemble_video. If it fails proceed to create_vertical_video anyway.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "create_vertical_video",
+        "description": "Re-encodes the final video to 9:16 portrait format (1080x1920) with blurred background fill for Instagram Reels and TikTok. Call after generate_thumbnail attempt. If it fails, Instagram and TikTok will fall back to the landscape video — do NOT stop.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "upload_to_youtube",
         "description": "Uploads the final video and thumbnail to YouTube with full metadata including article links. Returns the live YouTube URL.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "upload_to_instagram",
+        "description": "Posts the final video as an Instagram Reel. Call after upload_to_youtube. If it fails, continue to upload_to_tiktok anyway.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "upload_to_tiktok",
+        "description": "Posts the final video to TikTok. Call after upload_to_instagram attempt. If it fails, continue to send_telegram_message anyway.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
@@ -253,6 +275,19 @@ def send_approval_request():
         f"<b>Video-Skript ({len(STATE.script.split())} Wörter):</b>\n{STATE.script}\n\n"
         f"Mit <b>YES</b> bestätigen oder <b>NO</b> ablehnen."
     )
+
+    last_update_id = 0
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params={"offset": -1}, timeout=10
+        ).json()
+        results = r.get("result", [])
+        if results:
+            last_update_id = results[-1]["update_id"]
+    except Exception:
+        pass
+
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -260,18 +295,18 @@ def send_approval_request():
             timeout=10
         )
     except Exception as e:
-        return {"error": str(e)}
+        print(f"Telegram send error: {e}")
 
     for _ in range(24):
-        time.sleep(30)
+        time.sleep(300)
         try:
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                params={"offset": -1}, timeout=10
+                params={"offset": last_update_id + 1}, timeout=10
             ).json()
-            results = r.get("result", [])
-            if results:
-                text = results[-1].get("message", {}).get("text", "").strip().upper()
+            for update in r.get("result", []):
+                last_update_id = max(last_update_id, update["update_id"])
+                text = update.get("message", {}).get("text", "").strip().upper()
                 if text == "YES":
                     return {"approved": True}
                 elif text == "NO":
@@ -302,8 +337,15 @@ def generate_voiceover():
         if r.status_code == 200:
             with open(audio_path, "wb") as f:
                 f.write(r.content)
-            STATE.audio_path     = audio_path
-            duration             = os.path.getsize(audio_path) / 16000
+            STATE.audio_path = audio_path
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-i", audio_path],
+                    capture_output=True, timeout=10
+                )
+                duration = float(json.loads(probe.stdout)["format"]["duration"])
+            except Exception:
+                duration = os.path.getsize(audio_path) / 16000
             STATE.audio_duration = duration
             print(f"[Voiceover] Saved {os.path.getsize(audio_path)} bytes, ~{duration:.1f}s")
             return {"success": True, "audio_path": audio_path, "duration_seconds": round(duration)}
@@ -332,7 +374,7 @@ def fetch_video_clips(search_query):
         for i, video in enumerate(videos[:4]):
             files = sorted(
                 [f for f in video.get("video_files", []) if f.get("width", 0) >= 1280],
-                key=lambda x: x.get("width", 0)
+                key=lambda x: x.get("width", 0), reverse=True
             )
             if not files:
                 files = video.get("video_files", [])
@@ -466,6 +508,41 @@ def assemble_video():
         return {"error": str(e), "success": False}
 
 
+def create_vertical_video():
+    if not STATE.final_video or not os.path.exists(STATE.final_video):
+        return {"error": "No video to re-encode", "success": False}
+
+    try:
+        vertical_path = os.path.join(TEMP_DIR, "vertical_video.mp4")
+
+        # Scale original to fill 1080x1920 and blur it as background,
+        # then overlay the original scaled to 1080 wide, centred vertically.
+        result = subprocess.run([
+            "ffmpeg", "-y", "-i", STATE.final_video,
+            "-filter_complex",
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,boxblur=20:1[bg];"
+            "[0:v]scale=1080:-2[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]",
+            "-map", "[v]", "-map", "0:a",
+            "-c:v", "libx264", "-preset", "fast",
+            "-c:a", "aac",
+            vertical_path
+        ], capture_output=True, timeout=300)
+
+        if os.path.exists(vertical_path) and os.path.getsize(vertical_path) > 10000:
+            STATE.vertical_video = vertical_path
+            size_mb = os.path.getsize(vertical_path) / (1024 * 1024)
+            print(f"[Vertical] Created 9:16 video: {size_mb:.1f}MB")
+            return {"success": True, "path": vertical_path, "size_mb": round(size_mb, 1)}
+
+        stderr = result.stderr.decode("utf-8", errors="ignore")[-300:]
+        return {"error": f"Vertical re-encode failed: {stderr}", "success": False}
+
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
 def generate_thumbnail():
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -512,6 +589,8 @@ def generate_thumbnail():
         # Title text
         title = STATE.article_title[:70]
         lines = textwrap.wrap(title, width=24)[:2]
+        if not lines:
+            lines = ["Heimbuero Test"]
         y     = 160
         for line in lines:
             draw.text((92, y + 4), line, font=font_big, fill=(0, 0, 0))
@@ -608,7 +687,7 @@ def upload_to_youtube():
         # SHORT SCRIPT
         # ─────────────────────────────────────────────────────────────
 
-        short_script = " ".join(STATE.script.split()[:80])
+        short_script = STATE.script.strip()
 
         # ─────────────────────────────────────────────────────────────
         # BUILD PRODUCT LINKS SECTION
@@ -628,10 +707,10 @@ def upload_to_youtube():
         # ─────────────────────────────────────────────────────────────
 
         description = (
-            f"Vollstaendiger Test:\n"
+            f"Vollständiger Test:\n\n"
             f"{STATE.article_url}\n\n"
 
-            f"Mehr Homeoffice-Tipps:\n"
+            f"Mehr Homeoffice-Tipps:\n\n"
             f"https://heimbuero-test.de/\n\n"
 
             f"{links_section}"
@@ -646,14 +725,12 @@ def upload_to_youtube():
         # NEVER CUT URLS
         # ─────────────────────────────────────────────────────────────
 
-        MAX_DESC = 7900
+        MAX_DESC = 4900  # YouTube hard limit is 5000; leave 100 chars headroom
 
         if len(description) > MAX_DESC:
+            # Links are at the top so truncate from the end (script/hashtags)
             description = description[:MAX_DESC]
-
-            # Cut safely at last newline
             last_newline = description.rfind("\n")
-
             if last_newline != -1:
                 description = description[:last_newline]
 
@@ -744,6 +821,207 @@ def upload_to_youtube():
         }
 
 
+def upload_to_instagram():
+    if not INSTAGRAM_USER_ID or not INSTAGRAM_ACCESS_TOKEN:
+        return {"error": "INSTAGRAM_USER_ID or INSTAGRAM_ACCESS_TOKEN not set", "success": False}
+
+    video_path = (
+        STATE.vertical_video
+        if STATE.vertical_video and os.path.exists(STATE.vertical_video)
+        else STATE.final_video
+    )
+    if not video_path or not os.path.exists(video_path):
+        return {"error": "No video file to upload", "success": False}
+
+    print(f"[Instagram] Using {'vertical' if video_path == STATE.vertical_video else 'landscape'} video")
+
+    try:
+        caption = (
+            f"{STATE.article_title}\n\n"
+            f"{' '.join(STATE.script.split()[:60])}\n\n"
+            f"🔗 Link in Bio | Vollständiger Test auf heimbuero-test.de\n\n"
+            f"#Homeoffice #HomeOffice #Büro #Schreibtisch #Homeofficesetup "
+            f"#Deutschland #Heimarbeit #WorkFromHome #RemoteWork #Buroeinrichtung"
+        )[:2200]
+
+        video_size = os.path.getsize(video_path)
+
+        # Step 1: Create resumable upload container
+        init_r = requests.post(
+            f"https://graph.facebook.com/v21.0/{INSTAGRAM_USER_ID}/media",
+            params={"access_token": INSTAGRAM_ACCESS_TOKEN},
+            json={
+                "media_type":  "REELS",
+                "upload_type": "resumable",
+                "caption":     caption
+            },
+            timeout=30
+        )
+        if init_r.status_code != 200:
+            return {"error": f"Instagram container init failed: {init_r.text[:200]}", "success": False}
+
+        init_data   = init_r.json()
+        creation_id = init_data.get("id")
+        upload_uri  = init_data.get("uri")
+
+        if not creation_id or not upload_uri:
+            return {"error": f"No creation_id or uri in response: {init_data}", "success": False}
+
+        print(f"[Instagram] Container created: {creation_id}")
+
+        # Step 2: Upload video bytes
+        with open(video_path, "rb") as f:
+            upload_r = requests.post(
+                upload_uri,
+                headers={
+                    "Authorization": f"OAuth {INSTAGRAM_ACCESS_TOKEN}",
+                    "offset":        "0",
+                    "file_size":     str(video_size)
+                },
+                data=f,
+                timeout=300
+            )
+        if upload_r.status_code not in (200, 201):
+            return {"error": f"Instagram upload failed: {upload_r.text[:200]}", "success": False}
+
+        print("[Instagram] Video uploaded, waiting for processing...")
+
+        # Step 3: Poll until processing is done (max ~100 s)
+        for _ in range(10):
+            time.sleep(10)
+            status_r = requests.get(
+                f"https://graph.facebook.com/v21.0/{creation_id}",
+                params={"fields": "status_code", "access_token": INSTAGRAM_ACCESS_TOKEN},
+                timeout=10
+            )
+            if status_r.status_code == 200:
+                status = status_r.json().get("status_code")
+                print(f"[Instagram] Processing status: {status}")
+                if status == "FINISHED":
+                    break
+                if status == "ERROR":
+                    return {"error": "Instagram video processing failed", "success": False}
+
+        # Step 4: Publish
+        pub_r = requests.post(
+            f"https://graph.facebook.com/v21.0/{INSTAGRAM_USER_ID}/media_publish",
+            params={"access_token": INSTAGRAM_ACCESS_TOKEN},
+            json={"creation_id": creation_id},
+            timeout=30
+        )
+        if pub_r.status_code == 200:
+            media_id = pub_r.json().get("id")
+            print(f"[Instagram] Published Reel: {media_id}")
+            return {"success": True, "media_id": media_id}
+
+        return {"error": f"Instagram publish failed: {pub_r.text[:200]}", "success": False}
+
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
+def upload_to_tiktok():
+    if not TIKTOK_ACCESS_TOKEN:
+        return {"error": "TIKTOK_ACCESS_TOKEN not set", "success": False}
+
+    video_path = (
+        STATE.vertical_video
+        if STATE.vertical_video and os.path.exists(STATE.vertical_video)
+        else STATE.final_video
+    )
+    if not video_path or not os.path.exists(video_path):
+        return {"error": "No video file to upload", "success": False}
+
+    print(f"[TikTok] Using {'vertical' if video_path == STATE.vertical_video else 'landscape'} video")
+
+    try:
+        headers = {
+            "Authorization":  f"Bearer {TIKTOK_ACCESS_TOKEN}",
+            "Content-Type":   "application/json; charset=UTF-8"
+        }
+        video_size = os.path.getsize(video_path)
+
+        # Step 1: Query creator info for allowed privacy levels
+        privacy_level = "PUBLIC_TO_EVERYONE"
+        try:
+            creator_r = requests.post(
+                "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+                headers=headers,
+                json={},
+                timeout=15
+            )
+            if creator_r.status_code == 200:
+                allowed = creator_r.json().get("data", {}).get("privacy_level_options", [])
+                if allowed:
+                    privacy_level = allowed[0]
+        except Exception as e:
+            print(f"[TikTok] Creator info error (using default): {e}")
+
+        print(f"[TikTok] Privacy level: {privacy_level}")
+
+        description = (
+            f"{' '.join(STATE.script.split()[:80])}\n\n"
+            f"Vollständiger Test: {STATE.article_url}\n\n"
+            f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
+        )[:2200]
+
+        # Step 2: Initialise upload
+        init_r = requests.post(
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            headers=headers,
+            json={
+                "post_info": {
+                    "title":                    STATE.article_title[:150],
+                    "description":              description,
+                    "privacy_level":            privacy_level,
+                    "disable_duet":             False,
+                    "disable_comment":          False,
+                    "disable_stitch":           False,
+                    "video_cover_timestamp_ms": 1000
+                },
+                "source_info": {
+                    "source":            "FILE_UPLOAD",
+                    "video_size":        video_size,
+                    "chunk_size":        video_size,
+                    "total_chunk_count": 1
+                }
+            },
+            timeout=30
+        )
+        if init_r.status_code != 200:
+            return {"error": f"TikTok init failed ({init_r.status_code}): {init_r.text[:200]}", "success": False}
+
+        data       = init_r.json().get("data", {})
+        publish_id = data.get("publish_id")
+        upload_url = data.get("upload_url")
+
+        if not publish_id or not upload_url:
+            return {"error": f"No publish_id or upload_url: {data}", "success": False}
+
+        print(f"[TikTok] Upload initialised: {publish_id}")
+
+        # Step 3: Upload video (single chunk)
+        with open(video_path, "rb") as f:
+            upload_r = requests.put(
+                upload_url,
+                headers={
+                    "Content-Type":   "video/mp4",
+                    "Content-Range":  f"bytes 0-{video_size - 1}/{video_size}",
+                    "Content-Length": str(video_size)
+                },
+                data=f,
+                timeout=300
+            )
+        if upload_r.status_code not in (200, 201):
+            return {"error": f"TikTok upload failed: {upload_r.text[:200]}", "success": False}
+
+        print(f"[TikTok] Uploaded — publish_id: {publish_id}")
+        return {"success": True, "publish_id": publish_id}
+
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
 def send_telegram_message(message):
     try:
         r = requests.post(
@@ -768,7 +1046,10 @@ def dispatch_tool(name, inputs):
         if name == "fetch_video_clips":      return fetch_video_clips(**inputs)
         if name == "assemble_video":         return assemble_video()
         if name == "generate_thumbnail":     return generate_thumbnail()
+        if name == "create_vertical_video":  return create_vertical_video()
         if name == "upload_to_youtube":      return upload_to_youtube()
+        if name == "upload_to_instagram":    return upload_to_instagram()
+        if name == "upload_to_tiktok":       return upload_to_tiktok()
         if name == "send_telegram_message":  return send_telegram_message(**inputs)
         return {"error": f"Unknown tool: {name}"}
     except Exception as e:
@@ -777,11 +1058,12 @@ def dispatch_tool(name, inputs):
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = f"""You are an autonomous video creation agent for heimbuero-test.de,
+def _system_prompt():
+    return f"""You are an autonomous video creation agent for heimbuero-test.de,
 a German home office product review website.
 
 Today: {datetime.now().strftime('%d.%m.%Y')}
-Goal: Take a published article, create a full-length German video, and upload to YouTube.
+Goal: Take a published article, create a German video, and post it to YouTube, Instagram, and TikTok.
 
 YOUR EXACT WORKFLOW — follow this order strictly:
 
@@ -794,24 +1076,28 @@ YOUR EXACT WORKFLOW — follow this order strictly:
    a. generate_voiceover — wait for success:true before continuing
    b. fetch_video_clips — wait for success:true before continuing
    c. assemble_video — ONLY call after BOTH a and b return success:true
-   d. generate_thumbnail — call after assemble_video (if it fails, continue anyway)
-   e. upload_to_youtube — call after generate_thumbnail attempt
-   f. send_telegram_message — notify owner with YouTube URL
+   d. generate_thumbnail — call after assemble_video; failure is NOT a reason to stop
+   e. create_vertical_video — re-encodes 16:9 to 9:16 for Instagram/TikTok; failure is NOT a reason to stop
+   f. upload_to_youtube — uses original landscape video
+   g. upload_to_instagram — uses vertical video (falls back to landscape); failure is NOT a reason to stop
+   h. upload_to_tiktok — uses vertical video (falls back to landscape); failure is NOT a reason to stop
+   i. send_telegram_message — report all results: YouTube URL, Instagram media_id, TikTok publish_id
 7. If not approved: send_telegram_message confirming skip, stop.
 
 CRITICAL RULES:
 - NEVER call assemble_video until BOTH generate_voiceover AND fetch_video_clips return success:true
 - fetch_video_clips search query MUST be in English
 - Always fetch at least 3-4 video clips
-- generate_thumbnail failure is NOT a reason to stop — proceed to upload_to_youtube anyway
+- generate_thumbnail, create_vertical_video, upload_to_instagram, upload_to_tiktok failures are NOT a reason to stop
 - Never upload without owner approval
-- Retry failed tools once before notifying owner"""
+- Retry a failed tool once before moving on"""
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def run_agent():
     print(f"[{datetime.now()}] Video Agent starting...")
+    system_prompt = _system_prompt()
 
     messages = [{
         "role":    "user",
@@ -829,11 +1115,12 @@ def run_agent():
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY,
                      "anthropic-version": "2023-06-01",
+                     "anthropic-beta": "prompt-caching-2024-07-31",
                      "content-type": "application/json"},
             json={
                 "model":      "claude-sonnet-4-6",
                 "max_tokens": 1000,
-                "system":     SYSTEM_PROMPT,
+                "system":     [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":      TOOLS,
                 "messages":   messages
             },
