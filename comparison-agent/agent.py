@@ -34,14 +34,15 @@ CATEGORIES = [
 # # ── Agent state ────────────────────────────────────────────────────────────────
 class ComparisonState:
     def __init__(self):
-        self.category        = ""
-        self.products        = []       # list of product names to compare
-        self.product_specs   = {}       # dict: product name → spec summary
+        self.category         = ""
+        self.products         = []       # list of product names to compare
+        self.product_specs    = {}       # dict: product name → spec summary
         self.comparison_title = ""
-        self.outline         = ""
-        self.image_html      = ""
-        self.article_html    = ""
-        self.reason          = ""
+        self.outline          = ""
+        self.image_html       = ""
+        self.article_html     = ""
+        self.reason           = ""
+        self.meta_description = ""
 
 STATE = ComparisonState()
 
@@ -96,7 +97,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "List of 2-5 product names to compare"
                 },
-                "comparison_title":  {"type": "string", "description": "German article title e.g. 'Herman Miller Aeron vs Steelcase Leap: Welcher Bürostuhl lohnt sich 2026?'"},
+                "comparison_title":  {"type": "string", "description": "German article title ≤70 characters e.g. 'Aeron vs Leap: Welcher Bürostuhl lohnt 2026?'"},
                 "reason":            {"type": "string", "description": "Why this comparison is a good opportunity (search volume, competition gap, trending)"}
             },
             "required": ["category", "products", "comparison_title", "reason"]
@@ -448,15 +449,62 @@ def write_comparison_article():
         if "content" in data:
             STATE.article_html = data["content"][0]["text"]
             word_count = len(STATE.article_html.split())
+            try:
+                meta_r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 80,
+                        "messages": [{
+                            "role": "user",
+                            "content": (
+                                f"Schreibe eine Meta-Beschreibung auf Deutsch (120-155 Zeichen) für:\n"
+                                f"Titel: {STATE.comparison_title}\n"
+                                f"Produkte: {', '.join(STATE.products)}\n"
+                                f"Enthält das Hauptkeyword, beschreibt den Mehrwert. Nur die Beschreibung, kein Anführungszeichen."
+                            )
+                        }]
+                    },
+                    timeout=15
+                )
+                STATE.meta_description = meta_r.json().get("content", [{}])[0].get("text", "").strip()[:155]
+            except Exception:
+                STATE.meta_description = f"{STATE.comparison_title} – Detaillierter Vergleich mit Testurteil und Kaufempfehlung."
             return {"success": True, "word_count": word_count}
         return {"error": data.get("error", {}).get("message", "Unknown"), "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
 
 
+def _ping_search_engines():
+    sitemap = f"{WP_URL}/sitemap.xml"
+    for ping_url in [
+        f"https://www.google.com/ping?sitemap={sitemap}",
+        f"https://www.bing.com/ping?sitemap={sitemap}"
+    ]:
+        try:
+            requests.get(ping_url, timeout=5)
+        except Exception:
+            pass
+
+
 def publish_article():
-    full_content = STATE.image_html + STATE.article_html
-    if not full_content.strip():
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": STATE.comparison_title,
+        "description": STATE.meta_description or STATE.comparison_title,
+        "itemListElement": [
+            {"@type": "ListItem", "position": i + 1, "name": p}
+            for i, p in enumerate(STATE.products)
+        ]
+    }
+    schema_script = f'\n<script type="application/ld+json">{json.dumps(schema, ensure_ascii=False)}</script>'
+    full_content = STATE.image_html + STATE.article_html + schema_script
+    if not STATE.article_html.strip():
         return {"success": False, "error": "No content — write_comparison_article must be called first"}
     try:
         r = requests.post(
@@ -466,12 +514,14 @@ def publish_article():
                 "title":      STATE.comparison_title,
                 "content":    full_content,
                 "status":     "publish",
-                "categories": [WP_CATEGORY_ID]
+                "categories": [WP_CATEGORY_ID],
+                "meta":       {"_yoast_wpseo_metadesc": STATE.meta_description}
             },
             timeout=30
         )
         if r.status_code == 201:
             link = r.json().get("link", "")
+            _ping_search_engines()
             return {"success": True, "link": link}
         return {"success": False, "status": r.status_code, "body": r.text[:300]}
     except Exception as e:
@@ -550,6 +600,7 @@ COMPARISON ARTICLE RULES:
 - Pick products with genuine search demand in Germany
 - Title format: "Produkt A vs Produkt B: Welcher [Kategorie] lohnt sich [Jahr]?"
   or "Top 3 [Kategorie]: [Brand] vs [Brand] vs [Brand] im Test [Jahr]"
+- Keep titles ≤70 characters — truncate brand names if needed, primary keyword first
 - Must include a comparison table and verdict
 - Affiliate links for EVERY product compared
 - Never pass article content between tools — publish_article reads from state directly

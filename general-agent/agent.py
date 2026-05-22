@@ -26,6 +26,7 @@ class AgentState:
         self.chosen_keyword      = ""
         self.chosen_outline      = ""
         self.competitor_insights = ""
+        self.meta_description    = ""
 
 STATE = AgentState()
 
@@ -344,7 +345,7 @@ def fetch_image():
             ph_url       = photo["user"]["links"]["html"]
             STATE.image_html = (
                 f'<figure style="margin:0 0 2rem 0;">'
-                f'<img src="{img_url}" alt="{STATE.chosen_keyword}" '
+                f'<img src="{img_url}" alt="{STATE.chosen_keyword} – Homeoffice Ratgeber {datetime.now().year}" '
                 f'style="width:100%;height:400px;object-fit:cover;border-radius:8px;">'
                 f'<figcaption style="font-size:12px;color:#666;margin-top:6px;">'
                 f'Foto: <a href="{ph_url}?utm_source=heimbuero_test&utm_medium=referral" '
@@ -401,17 +402,60 @@ def write_article():
         if "content" in data:
             STATE.article_html = data["content"][0]["text"]
             word_count = len(STATE.article_html.split())
+            try:
+                meta_r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 80,
+                        "messages": [{
+                            "role": "user",
+                            "content": (
+                                f"Schreibe eine Meta-Beschreibung auf Deutsch (120-155 Zeichen) für:\n"
+                                f"Keyword: {STATE.chosen_keyword}\n"
+                                f"Enthält das Keyword, beschreibt den Mehrwert. Nur die Beschreibung, kein Anführungszeichen."
+                            )
+                        }]
+                    },
+                    timeout=15
+                )
+                STATE.meta_description = meta_r.json().get("content", [{}])[0].get("text", "").strip()[:155]
+            except Exception:
+                STATE.meta_description = f"{STATE.chosen_keyword} – Test, Vergleich und Kaufberatung für das Homeoffice."
             return {"success": True, "word_count": word_count}
         return {"error": data.get("error", {}).get("message", "Unknown"), "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
 
 
-def publish_article():
-    # Combine in Python — never passes through Claude
-    full_content = STATE.image_html + STATE.article_html
+def _ping_search_engines():
+    sitemap = f"{WP_URL}/sitemap.xml"
+    for ping_url in [
+        f"https://www.google.com/ping?sitemap={sitemap}",
+        f"https://www.bing.com/ping?sitemap={sitemap}"
+    ]:
+        try:
+            requests.get(ping_url, timeout=5)
+        except Exception:
+            pass
 
-    if not full_content.strip():
+
+def publish_article():
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": STATE.chosen_keyword,
+        "description": STATE.meta_description or STATE.chosen_keyword,
+        "datePublished": datetime.now().strftime("%Y-%m-%d"),
+        "publisher": {"@type": "Organization", "name": "HeimBüro Test", "url": WP_URL or "https://heimbuero-test.de"}
+    }
+    schema_script = f'\n<script type="application/ld+json">{json.dumps(schema, ensure_ascii=False)}</script>'
+    full_content = STATE.image_html + STATE.article_html + schema_script
+
+    if not STATE.article_html.strip():
         return {"success": False, "error": "No content to publish — write_article must be called first"}
 
     try:
@@ -422,12 +466,14 @@ def publish_article():
                 "title":      STATE.chosen_keyword,
                 "content":    full_content,
                 "status":     "publish",
-                "categories": [WP_CATEGORY_ID]
+                "categories": [WP_CATEGORY_ID],
+                "meta":       {"_yoast_wpseo_metadesc": STATE.meta_description}
             },
             timeout=30
         )
         if r.status_code == 201:
             link = r.json().get("link", "")
+            _ping_search_engines()
             return {"success": True, "link": link}
         return {"success": False, "status": r.status_code, "body": r.text[:300]}
     except Exception as e:
@@ -505,7 +551,8 @@ RULES:
 - Never skip set_chosen_keyword — it stores your choice for other tools
 - Never try to pass article text as a parameter — publish_article handles everything
 - Pick keywords with buying intent: Test, Vergleich, bester, unter X Euro
-- Avoid already published topics"""
+- Avoid already published topics
+- Keep the chosen keyword (used as article title) ≤60 characters, primary keyword first"""
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
