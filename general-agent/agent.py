@@ -392,7 +392,15 @@ def write_article():
                         f"- Professioneller aber freundlicher Ton\n"
                         f"- Reines HTML mit H1/H2/H3 Tags\n"
                         f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html\n"
-                        f"- Kein Affiliate-Disclaimer, kein Hinweis-Text am Ende des Artikels"
+                        f"- Kein Affiliate-Disclaimer, kein Hinweis-Text am Ende des Artikels\n"
+                        f"- WICHTIG: Schreibe NIEMALS so als ob wir die Produkte persönlich getestet haben.\n"
+                        f"  VERBOTEN: 'wir haben getestet', 'in unserem Test', 'haben wir ausprobiert',\n"
+                        f"  'im Praxistest', 'unser Testsieger', 'unter realen Bedingungen getestet',\n"
+                        f"  'ausführlich getestet', 'auf Basis unserer Tests', 'haben wir gemessen'.\n"
+                        f"  STATTDESSEN verwende: 'laut Nutzerbewertungen', 'laut Hersteller',\n"
+                        f"  'Nutzerbewertungen zeigen', 'basierend auf Produktdaten und Bewertungen',\n"
+                        f"  'unsere Empfehlung', 'Preis-Leistungs-Tipp', 'laut Testberichten',\n"
+                        f"  'in der Praxis berichten Nutzer', 'Experten empfehlen'."
                     )                
                 }]
             },
