@@ -5,6 +5,6 @@
   "deploy": {
     "startCommand": "python agent.py",
     "restartPolicyType": "Never",
-    "cronSchedule": "0 8 * * *"
+    "cronSchedule": "0 15 * * 2,5"
   }
 }
