@@ -16,12 +16,9 @@ UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 SERPAPI_KEY         = os.environ.get("SERPAPI_KEY")
 WP_CATEGORY_ID      = int(os.environ.get("WP_CATEGORY_ID", "4"))
 
-# Content style: always "research" — agent is a researcher, never a tester
-CONTENT_STYLE = "research"
-
 MAX_ITERATIONS = 20
 
-# ── Agent state — content never passes through Claude, stored here ─────────────
+# ── Agent state ────────────────────────────────────────────────────────────────
 class AgentState:
     def __init__(self):
         self.image_html          = ""
@@ -82,9 +79,9 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "keyword":              {"type": "string", "description": "The keyword you chose to write about."},
-                "reason":               {"type": "string", "description": "Why you chose this keyword (trend data, competition gap)."},
-                "competitor_insights":  {"type": "string", "description": "What competitors are missing that we should cover."}
+                "keyword":              {"type": "string"},
+                "reason":               {"type": "string"},
+                "competitor_insights":  {"type": "string", "description": "Specific gaps in competitor content we should fill."}
             },
             "required": ["keyword", "reason"]
         }
@@ -101,7 +98,7 @@ TOOLS = [
         "name": "send_approval_request",
         "description": (
             "Sends the keyword, reason, and outline to the owner on Telegram for approval. "
-            "Then waits for YES or NO reply. Returns approved: true/false."
+            "Waits for YES or NO reply. Returns approved: true/false."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
@@ -114,7 +111,6 @@ TOOLS = [
         "name": "write_article",
         "description": (
             "Writes the full SEO buying guide for the chosen keyword following the outline. "
-            "Article is research-based — no fake test claims. "
             "Stores article HTML in state. Returns word count and success status."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
@@ -122,7 +118,7 @@ TOOLS = [
     {
         "name": "validate_article",
         "description": (
-            "Scans the article HTML for forbidden fake-test phrases before publishing. "
+            "Scans the article HTML for forbidden phrases before publishing. "
             "Returns pass: true/false and a list of violations if any found. "
             "Must be called after write_article and before publish_article."
         ),
@@ -231,7 +227,7 @@ def set_chosen_keyword(keyword, reason, competitor_insights=""):
     STATE.chosen_keyword      = keyword
     STATE.competitor_insights = competitor_insights
     print(f"[State] Keyword set: {keyword}")
-    return {"success": True, "keyword": keyword, "reason": reason}
+    return {"success": True, "keyword": keyword}
 
 
 def write_outline():
@@ -242,20 +238,17 @@ def write_outline():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-4-20250514",
                 "max_tokens": 600,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Erstelle eine Gliederung für einen RECHERCHE-BASIERTEN Kaufratgeber (KEIN Testbericht).\n"
+                        f"Erstelle eine Gliederung für einen Kaufratgeber.\n"
                         f"Thema: '{STATE.chosen_keyword}'\n"
                         f"Zielgruppe: Heimarbeiter in Deutschland die ein Produkt kaufen möchten.\n"
-                        f"Konkurrenzlücken zu füllen: {STATE.competitor_insights}\n\n"
-                        f"Format: Genau 5 H2-Abschnitte die einem Käufer helfen eine informierte Entscheidung zu treffen.\n\n"
-                        f"ERLAUBT: 'Kaufberatung', 'Worauf achten', 'Empfehlungen laut Bewertungen', "
-                        f"'Für wen lohnt es sich', 'FAQ', 'Was sagen Nutzer'\n"
-                        f"VERBOTEN: 'Testergebnis', 'Testsieger', 'Praxistest', 'unser Test', "
-                        f"'haben wir getestet', 'Testteam'\n\n"
+                        f"Lücken die Konkurrenten vernachlässigen: {STATE.competitor_insights}\n\n"
+                        f"Format: Genau 5 H2-Abschnitte. Jeder Abschnitt soll einem Käufer "
+                        f"helfen eine bessere Entscheidung zu treffen.\n\n"
                         f"Gib nur die 5 Gliederungspunkte aus, nichts weiter."
                     )
                 }]
@@ -275,7 +268,7 @@ def send_approval_request():
     message = (
         f"<b>Heimbuero Agent — Approval Request</b>\n\n"
         f"<b>Keyword:</b> {STATE.chosen_keyword}\n\n"
-        f"<b>Why this keyword:</b>\n{STATE.competitor_insights or 'Trending in Germany'}\n\n"
+        f"<b>Competitor gaps we'll cover:</b>\n{STATE.competitor_insights or '—'}\n\n"
         f"<b>Outline:</b>\n{STATE.chosen_outline}\n\n"
         f"Reply <b>YES</b> to approve or <b>NO</b> to skip."
     )
@@ -348,8 +341,6 @@ def fetch_image():
             .replace("Test", "") \
             .strip()
 
-        print(f"[Image] Searching Unsplash for: {english_query}")
-
         r = requests.get(
             "https://api.unsplash.com/search/photos",
             params={"query": english_query, "per_page": 1, "orientation": "landscape"},
@@ -372,15 +363,27 @@ def fetch_image():
                 f'<a href="https://unsplash.com/?utm_source=heimbuero_test&utm_medium=referral" '
                 f'target="_blank">Unsplash</a></figcaption></figure>'
             )
-            return {"success": True, "photographer": photographer, "query_used": english_query}
+            return {"success": True, "photographer": photographer}
         STATE.image_html = ""
-        return {"success": False, "reason": "no results", "query_used": english_query}
+        return {"success": False, "reason": "no results"}
     except Exception as e:
         STATE.image_html = ""
         return {"success": False, "error": str(e)}
 
 
 def write_article():
+    """
+    Writes a buying guide that sounds like a knowledgeable friend — specific,
+    opinionated, structured — without fake sourcing hedges or fake test claims.
+
+    Key changes from original:
+    - Removed the mandatory "laut Amazon-Bewertungen / Käufer berichten" style list.
+      Those phrases were the primary HCU signal in every generated article.
+    - Instead: specific model names, real prices, concrete criteria, honest trade-offs.
+    - Added a required "Redaktionelle Einschätzung" section — one concrete recommendation
+      with a reason. This is what separates useful content from aggregated noise.
+    - Banned both fake-test AND fake-sourcing phrases in the same prompt.
+    """
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -388,72 +391,71 @@ def write_article():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-4-20250514",
                 "max_tokens": 8000,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Du bist ein Produktrechercheur für heimbuero-test.de. "
-                        f"Du hast die Produkte NICHT persönlich besessen, getestet oder ausprobiert.\n"
-                        f"Deine Quellen sind ausschließlich: Amazon.de Nutzerbewertungen, "
-                        f"Hersteller-Spezifikationen, Fachmedien und Testberichte Dritter "
-                        f"(z.B. CHIP, Computer Bild, Stiftung Warentest).\n\n"
-
-                        f"Schreibe einen ausführlichen deutschen SEO-Kaufratgeber zum Thema: '{STATE.chosen_keyword}'.\n\n"
+                        f"Schreibe einen deutschen SEO-Kaufratgeber zum Thema: "
+                        f"'{STATE.chosen_keyword}'\n\n"
 
                         f"Gliederung:\n{STATE.chosen_outline}\n\n"
 
-                        f"PFLICHT-ANFORDERUNGEN:\n"
-                        f"- Mindestens 1200 Wörter\n"
-                        f"- SEO-optimiert, Keyword natürlich eingebaut\n"
-                        f"- Verwende das Jahr {datetime.now().year} — niemals frühere Jahre\n"
-                        f"- Praxisnahe Kaufberatung für Heimarbeiter in Deutschland\n"
-                        f"- Beantworte häufige Leserfragen\n"
-                        f"- Decke diese Aspekte ab die Konkurrenten vernachlässigen: {STATE.competitor_insights}\n\n"
+                        f"Lücken gegenüber Konkurrenten die du abdecken sollst:\n"
+                        f"{STATE.competitor_insights}\n\n"
 
-                        f"PFLICHT-SCHREIBSTIL — immer diese Quellenformulierungen verwenden:\n"
-                        f"- 'Laut Amazon-Bewertungen...'\n"
-                        f"- 'Der Hersteller gibt an...'\n"
-                        f"- 'Käufer berichten...'\n"
-                        f"- 'Laut Produktdaten...'\n"
-                        f"- 'Laut Nutzerbewertungen...'\n"
-                        f"- 'Basierend auf Kundenfeedback...'\n"
-                        f"- 'Experten empfehlen...'\n"
-                        f"- 'Unsere Empfehlung basiert auf...'\n"
-                        f"- 'In der Praxis berichten Nutzer...'\n\n"
+                        f"=== ZIELGRUPPE ===\n"
+                        f"Heimarbeiter in Deutschland, die ein Produkt kaufen wollen "
+                        f"und eine klare, ehrliche Empfehlung suchen.\n\n"
 
-                        f"ABSOLUT VERBOTEN — diese Phrasen niemals verwenden:\n"
-                        f"- 'haben wir getestet' / 'in unserem Test' / 'haben wir gemessen'\n"
-                        f"- 'im Praxistest' / 'unser Testsieger' / 'haben wir ausprobiert'\n"
-                        f"- 'unter realen Bedingungen getestet' / 'ausführlich getestet'\n"
-                        f"- 'auf Basis unserer Tests' / 'konnten wir feststellen'\n"
-                        f"- 'Testteam' / 'Testperson' / 'Testzeitraum'\n"
-                        f"- Erfundene Messwerte (Temperaturen, dB-Werte, exakte Akkulaufzeiten als eigene Messung)\n"
-                        f"- Sterne-Ratings oder Punktesysteme als eigene Bewertung\n"
-                        f"- Testszenarien die nie stattfanden\n\n"
+                        f"=== WAS GUTEN INHALT AUSMACHT ===\n"
+                        f"Schreibe wie ein erfahrener Freund der sich in der Kategorie auskennt:\n"
+                        f"- Nenne konkrete Modellnamen und Preisbereiche "
+                        f"  (z.B. 'Der FlexiSpot E7 kostet rund 400 Euro und bietet...')\n"
+                        f"- Nenne einen echten Vorteil UND einen echten Nachteil pro Produkt\n"
+                        f"- Sage klar für wen ein Produkt geeignet ist und für wen nicht\n"
+                        f"- Beantworte die Fragen die Käufer wirklich haben "
+                        f"  (Garantie, Aufbau, Rücksendung, typische Probleme)\n"
+                        f"- Gib eine konkrete Empfehlung — nicht 'das kommt drauf an'\n"
+                        f"- Verwende das Jahr {datetime.now().year}\n"
+                        f"- Mindestens 1200 Wörter\n\n"
 
-                        f"ARTIKELSTRUKTUR:\n"
-                        f"- H1: Keyword + Jahr (z.B. 'Keyword Kaufratgeber {datetime.now().year}')\n"
-                        f"- H2: Worauf achten beim Kauf? (Kaufkriterien erklären)\n"
-                        f"- H2: Empfehlungen laut Nutzerbewertungen (Produkte vorstellen)\n"
-                        f"- H2: Für wen lohnt sich welches Modell?\n"
-                        f"- H2: FAQ – Häufige Fragen\n\n"
+                        f"=== PFLICHTABSCHNITT ===\n"
+                        f"Füge einen Abschnitt 'Unsere Einschätzung' ein, der:\n"
+                        f"- Ein konkretes Modell als Hauptempfehlung nennt (mit Begründung)\n"
+                        f"- Ein Budget-Alternative nennt\n"
+                        f"- Einen Satz dazu schreibt, für wen sich keines der Produkte lohnt\n\n"
 
-                        f"AFFILIATE LINKS — 3-4 Amazon.de Links einbauen:\n"
+                        f"=== ABSOLUT VERBOTEN ===\n"
+                        f"Diese Phrasen machen den Artikel wertlos — niemals verwenden:\n\n"
+                        f"Fake-Quellen (klingen nach KI, bieten keinen Mehrwert):\n"
+                        f"'laut Amazon-Bewertungen', 'laut Bewertungen', "
+                        f"'basierend auf Kundenfeedback', 'Käufer berichten', "
+                        f"'Nutzer berichten', 'Experten empfehlen', 'laut Produktdaten', "
+                        f"'In der Praxis berichten Nutzer', 'Herstellerangaben zufolge', "
+                        f"'Unsere Empfehlung basiert auf'\n\n"
+                        f"Fake-Tests (nie stattgefunden):\n"
+                        f"'haben wir getestet', 'in unserem Test', 'haben wir gemessen', "
+                        f"'im Praxistest', 'unser Testsieger', 'haben wir ausprobiert', "
+                        f"'unter realen Bedingungen', 'ausführlich getestet', "
+                        f"'Testteam', 'Testperson', 'Testzeitraum'\n\n"
+
+                        f"=== AFFILIATE LINKS ===\n"
+                        f"3-4 Amazon.de Links einbauen:\n"
                         f"<a href='https://www.amazon.de/s?k=SUCHBEGRIFF&tag={AMAZON_TRACKING_ID}' "
                         f"rel='nofollow' target='_blank'>Produktname auf Amazon ansehen</a>\n"
-                        f"Ersetze SUCHBEGRIFF mit passendem deutschen Suchbegriff.\n\n"
-                        f"OTTO Links — 1-2 einbauen wo passend:\n"
-                        f"Allgemein: <a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>"
+                        f"SUCHBEGRIFF = passender deutscher Suchbegriff.\n\n"
+                        f"1-2 OTTO Links:\n"
+                        f"<a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>"
                         f"Passende Produkte bei OTTO ansehen</a>\n"
-                        f"Büro: <a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>"
+                        f"<a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>"
                         f"Bürobedarf bei OTTO Office ansehen</a>\n\n"
 
-                        f"FORMAT:\n"
-                        f"- Professioneller aber freundlicher Ton\n"
-                        f"- Reines HTML mit H1/H2/H3 Tags\n"
+                        f"=== FORMAT ===\n"
+                        f"- Reines HTML: H1, H2, H3, p, ul, li\n"
                         f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html\n"
-                        f"- Kein Affiliate-Disclaimer, kein Hinweis-Text am Ende\n"
+                        f"- Kein Disclaimer am Ende\n"
+                        f"- H1 = Keyword + {datetime.now().year}\n"
                     )
                 }]
             },
@@ -463,7 +465,8 @@ def write_article():
         if "content" in data:
             STATE.article_html = data["content"][0]["text"]
             word_count = len(STATE.article_html.split())
-            # Generate meta description with Haiku
+
+            # Meta description
             try:
                 meta_r = requests.post(
                     "https://api.anthropic.com/v1/messages",
@@ -471,7 +474,7 @@ def write_article():
                              "anthropic-version": "2023-06-01",
                              "content-type": "application/json"},
                     json={
-                        "model": "claude-sonnet-4-6",
+                        "model": "claude-sonnet-4-20250514",
                         "max_tokens": 80,
                         "messages": [{
                             "role": "user",
@@ -479,7 +482,7 @@ def write_article():
                                 f"Schreibe eine Meta-Beschreibung auf Deutsch (120-155 Zeichen) für:\n"
                                 f"Keyword: {STATE.chosen_keyword}\n"
                                 f"Enthält das Keyword, beschreibt den Mehrwert als Kaufratgeber. "
-                                f"Nur die Beschreibung, kein Anführungszeichen, kein 'Test' oder 'getestet'."
+                                f"Nur die Beschreibung, kein Anführungszeichen."
                             )
                         }]
                     },
@@ -488,7 +491,8 @@ def write_article():
                 STATE.meta_description = meta_r.json().get("content", [{}])[0].get("text", "").strip()[:155]
             except Exception:
                 STATE.meta_description = (
-                    f"{STATE.chosen_keyword} – Kaufratgeber und Empfehlungen für das Homeoffice {datetime.now().year}."
+                    f"{STATE.chosen_keyword} – Kaufratgeber und Empfehlungen "
+                    f"für das Homeoffice {datetime.now().year}."
                 )
             return {"success": True, "word_count": word_count}
         return {"error": data.get("error", {}).get("message", "Unknown"), "success": False}
@@ -498,11 +502,12 @@ def write_article():
 
 def validate_article():
     """
-    Hard mechanical check for forbidden fake-test phrases.
-    Does not rely on the LLM to police itself — runs deterministically.
+    Checks for both categories of forbidden phrases:
+    1. Fake-test claims (never stattgefunden)
+    2. AI-sourcing hedges (the HCU signal the original validator missed entirely)
     """
-    forbidden_phrases = [
-        # Fake testing claims
+    # Fake testing claims
+    fake_test_phrases = [
         "haben wir getestet",
         "in unserem test",
         "haben wir gemessen",
@@ -518,36 +523,57 @@ def validate_article():
         "testteam",
         "testperson",
         "testpersonen",
-        # Fake measurement data patterns
-        "grad celsius",       # temperature measurements we never took
-        "db(a)",              # decibel measurements we never took
         "haben wir ermittelt",
         "konnten wir messen",
         "unser test zeigt",
         "im test festgestellt",
         "haben wir überprüft",
-        # Fake scoring systems
         "von 100 punkten",
         "punkte vergeben",
         "testpunkte",
     ]
 
-    article_lower = STATE.article_html.lower()
-    violations = [phrase for phrase in forbidden_phrases if phrase in article_lower]
+    # AI-sourcing hedges — the primary HCU signal; these were *required* in the old prompt
+    ai_hedge_phrases = [
+        "laut amazon-bewertungen",
+        "laut bewertungen",
+        "basierend auf kundenfeedback",
+        "käufer berichten",
+        "nutzer berichten",
+        "experten empfehlen",
+        "laut produktdaten",
+        "in der praxis berichten nutzer",
+        "herstellerangaben zufolge",
+        "unsere empfehlung basiert auf",
+        "laut nutzerbewertungen",
+        "laut kundenbewertungen",
+    ]
 
-    if violations:
-        print(f"[Validate] FAILED — {len(violations)} violation(s): {violations}")
+    article_lower = STATE.article_html.lower()
+
+    fake_test_violations = [p for p in fake_test_phrases if p in article_lower]
+    ai_hedge_violations  = [p for p in ai_hedge_phrases  if p in article_lower]
+    all_violations       = fake_test_violations + ai_hedge_violations
+
+    if all_violations:
+        print(f"[Validate] FAILED — {len(all_violations)} violation(s): {all_violations}")
         return {
-            "pass": False,
-            "violations": violations,
-            "violation_count": len(violations),
-            "action": "Article blocked. Call write_article again — the forbidden phrases above must not appear."
+            "pass":            False,
+            "fake_test":       fake_test_violations,
+            "ai_hedges":       ai_hedge_violations,
+            "violation_count": len(all_violations),
+            "action": (
+                "Article blocked. Call write_article again. "
+                "AI-hedging phrases like 'laut Amazon-Bewertungen' and 'Käufer berichten' "
+                "are forbidden alongside fake-test phrases. "
+                "Replace them with specific model names, concrete facts, and direct opinions."
+            )
         }
 
     word_count = len(STATE.article_html.split())
     if word_count < 800:
         return {
-            "pass": False,
+            "pass":   False,
             "violations": ["article_too_short"],
             "action": f"Article only {word_count} words. Minimum is 800. Call write_article again."
         }
@@ -570,7 +596,7 @@ def _ping_search_engines():
 
 def publish_article():
     if not STATE.article_html.strip():
-        return {"success": False, "error": "No content to publish — write_article must be called first"}
+        return {"success": False, "error": "No content — call write_article first"}
 
     schema = {
         "@context": "https://schema.org",
@@ -654,61 +680,52 @@ a German home office product buying guide website.
 
 Today: {datetime.now().strftime('%d.%m.%Y')}
 Niche: Home office products for German workers.
-Content style: {CONTENT_STYLE} — you are a RESEARCHER, never a tester.
 
-━━━ IDENTITY ━━━
-You produce research-based buying guides. You have NEVER touched, owned,
-or tested any product. You aggregate information from:
-- Amazon.de user reviews
-- Manufacturer specifications
-- Third-party test reports (CHIP, Computer Bild, Stiftung Warentest, etc.)
-- Expert opinions from established tech media
+━━━ CONTENT STANDARD ━━━
+Write like a knowledgeable friend who knows the category well.
+Name specific products. Give concrete recommendations. Admit trade-offs honestly.
+Do NOT hide behind vague attribution language.
 
-Every product claim you write must include a source hedge:
-"laut Bewertungen", "laut Hersteller", "Nutzer berichten", "laut Produktdaten"
+The following phrases are banned from all content — they are the primary signal
+Google uses to identify low-quality AI content:
+"laut Amazon-Bewertungen", "Käufer berichten", "Nutzer berichten",
+"basierend auf Kundenfeedback", "Experten empfehlen", "laut Produktdaten"
 
-Never invent: temperatures, decibel values, battery runtimes measured by you,
-test scores, test team personas, or test scenarios that never happened.
-If you don't have a real sourced number, don't include the number.
+Also banned: any fake-test language ("haben wir getestet", "Testsieger", etc.)
 
-━━━ WORKFLOW — follow this exact order ━━━
+━━━ WORKFLOW ━━━
 
 PHASE 1 — RESEARCH:
-1. get_published_articles — see what is already live, avoid duplicates
+1. get_published_articles — avoid duplicate topics
 2. search_google_trends("Homeoffice") — find rising topics
 3. search_google_trends("Büro Zubehör") — find more opportunities
 4. get_related_searches for the most promising trend
-5. search_google on the best candidate to analyse competition
-6. set_chosen_keyword — commit to your choice with reason and competitor_insights
+5. search_google on the best candidate to analyse competitors
+6. set_chosen_keyword — commit with reason and specific competitor_insights
 
 PHASE 2 — APPROVAL:
-7. write_outline — generates buying guide outline using stored keyword
-8. send_approval_request — sends keyword + outline to owner, waits for YES/NO
+7. write_outline
+8. send_approval_request — wait for YES/NO
 
 PHASE 3 — PUBLISH (only if approved=true):
-9.  fetch_image — gets header image for stored keyword
-10. write_article — writes full research-based buying guide
-11. validate_article — checks for forbidden fake-test phrases
+9.  fetch_image
+10. write_article
+11. validate_article
     - If pass=false: call write_article again, then validate_article again
-    - Only proceed when validate_article returns pass=true
-12. publish_article — combines image + article and publishes to WordPress
-13. send_telegram_message — notify owner of success with the URL
+    - Only proceed when pass=true
+    - BOTH fake-test phrases AND ai-hedge phrases will cause failure
+12. publish_article
+13. send_telegram_message with the live URL
 
-If approved=false: send_telegram_message confirming skip, then stop.
+If approved=false: send_telegram_message confirming skip, stop.
 
-━━━ KEYWORD RULES ━━━
-- Always complete Phase 1 fully before choosing a keyword
-- Never skip set_chosen_keyword — it stores your choice for other tools
-- Never try to pass article text as a parameter — publish_article handles everything
-- Pick keywords with buying intent: Kaufratgeber, Vergleich, bester, unter X Euro
-- Avoid already published topics
-- Keep the chosen keyword (used as article title) ≤60 characters, primary keyword first
-- Prefer 'Kaufratgeber' or 'Vergleich' over 'Test' in keyword titles
-
-━━━ IMPORTANT ━━━
-- Never pass article content between tools — it is stored in agent state automatically
-- validate_article is mandatory before publish_article — never skip it
-- If validate_article fails twice, send_telegram_message to owner explaining the issue and stop"""
+━━━ RULES ━━━
+- Complete Phase 1 fully before choosing a keyword
+- Never skip set_chosen_keyword
+- validate_article is mandatory — never skip it
+- If validate_article fails twice: send_telegram_message explaining the issue and stop
+- Keyword (article title) ≤ 60 characters, primary keyword first
+- Prefer 'Kaufratgeber' or 'Vergleich' over 'Test' in titles"""
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -721,8 +738,9 @@ def run_agent():
         "role":    "user",
         "content": (
             f"Run your full workflow. Today is {datetime.now().strftime('%d.%m.%Y %H:%M')}. "
-            f"Start with research phase. Remember: you are a researcher, not a tester. "
-            f"validate_article is mandatory before publishing."
+            f"Start with research phase. "
+            f"validate_article is mandatory before publishing — "
+            f"it now checks for AI-hedging phrases as well as fake-test phrases."
         )
     }]
 
@@ -732,13 +750,13 @@ def run_agent():
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key":        ANTHROPIC_API_KEY,
+                "x-api-key":         ANTHROPIC_API_KEY,
                 "anthropic-version": "2023-06-01",
-                "anthropic-beta":   "prompt-caching-2024-07-31",
-                "content-type":     "application/json"
+                "anthropic-beta":    "prompt-caching-2024-07-31",
+                "content-type":      "application/json"
             },
             json={
-                "model":      "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-20250514",
                 "max_tokens": 1000,
                 "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":    TOOLS,
