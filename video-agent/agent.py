@@ -28,9 +28,32 @@ INSTAGRAM_USER_ID     = os.environ.get("INSTAGRAM_USER_ID")
 INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
 TIKTOK_ACCESS_TOKEN   = os.environ.get("TIKTOK_ACCESS_TOKEN")
 
+# Path to a simple JSON file tracking which post IDs have already been processed.
+# Prevents the agent from re-making a video for the same article on repeated runs.
+PROCESSED_IDS_PATH = os.path.join(os.path.dirname(__file__), "processed_ids.json")
+
 MAX_ITERATIONS = 18
 TEMP_DIR       = tempfile.mkdtemp()
 atexit.register(shutil.rmtree, TEMP_DIR, ignore_errors=True)
+
+
+# ── Processed-article tracking ─────────────────────────────────────────────────
+
+def _load_processed_ids() -> set:
+    if os.path.exists(PROCESSED_IDS_PATH):
+        try:
+            with open(PROCESSED_IDS_PATH) as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_processed_id(post_id: int):
+    ids = _load_processed_ids()
+    ids.add(post_id)
+    with open(PROCESSED_IDS_PATH, "w") as f:
+        json.dump(sorted(ids), f)
 
 
 # ── Agent state ────────────────────────────────────────────────────────────────
@@ -38,7 +61,8 @@ class VideoState:
     def __init__(self):
         self.article_title   = ""
         self.article_url     = ""
-        self.article_content = ""
+        self.article_content = ""   # structured plain text, up to 3000 chars
+        self.article_post_id = None # WP post ID — used for deduplication
         self.affiliate_links = []
         self.script          = ""
         self.audio_path      = ""
@@ -55,7 +79,11 @@ STATE = VideoState()
 TOOLS = [
     {
         "name": "get_latest_articles",
-        "description": "Fetches the 10 most recently published articles from WordPress.",
+        "description": (
+            "Fetches the 10 most recently published articles from WordPress. "
+            "Articles that have already been turned into a video are marked "
+            "already_processed:true — skip those and pick the most recent unprocessed one."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
@@ -143,6 +171,10 @@ TOOLS = [
 # ── Tool implementations ───────────────────────────────────────────────────────
 
 def get_latest_articles():
+    """
+    Returns the 10 most recent published posts, with an already_processed flag
+    so the agent knows which ones to skip.
+    """
     try:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts",
@@ -151,12 +183,15 @@ def get_latest_articles():
         )
         if r.status_code == 200:
             posts = r.json()
+            processed = _load_processed_ids()
             return {
                 "articles": [
                     {
-                        "title":   p["title"]["rendered"],
-                        "url":     p["link"],
-                        "excerpt": p["excerpt"]["rendered"][:200]
+                        "id":                p["id"],
+                        "title":             p["title"]["rendered"],
+                        "url":               p["link"],
+                        "excerpt":           p["excerpt"]["rendered"][:200],
+                        "already_processed": p["id"] in processed,
                     }
                     for p in posts
                 ]
@@ -167,6 +202,11 @@ def get_latest_articles():
 
 
 def fetch_article_content(article_url, article_title):
+    """
+    Fetches article content and extracts a *structured* plain-text representation
+    (preserving heading hierarchy) so the script generator has real context to
+    work with rather than a flat blob of stripped HTML.
+    """
     try:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts",
@@ -177,51 +217,50 @@ def fetch_article_content(article_url, article_title):
             post = r.json()[0]
             raw  = post["content"]["rendered"]
 
-            # Parse HTML properly
             soup = BeautifulSoup(raw, "html.parser")
 
-            all_links = []
-
-            # Extract REAL href URLs
+            # ── Affiliate / external links ─────────────────────────────────
+            skip_domains = [
+                "heimbuero-test.de", "unsplash.com", "wordpress.org",
+                "wp-content", "wp-admin", "gravatar.com"
+            ]
+            seen_links, unique_links = set(), []
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
-
-                if href.startswith("http"):
-                    all_links.append(href)
-
-            # Skip internal links
-            skip = [
-                "heimbuero-test.de",
-                "unsplash.com",
-                "wordpress.org",
-                "wp-content",
-                "wp-admin",
-                "gravatar.com"
-            ]
-
-            unique_links = []
-            seen = set()
-
-            for link in all_links:
-                if link not in seen and not any(s in link for s in skip):
-                    seen.add(link)
-                    unique_links.append(link)
-
-            # Store clean full URLs
+                if href.startswith("http") and href not in seen_links:
+                    if not any(s in href for s in skip_domains):
+                        seen_links.add(href)
+                        unique_links.append(href)
             STATE.affiliate_links = unique_links[:10]
-            # Plain text content
-            text = re.sub(r"<[^>]+>", " ", raw)
-            text = re.sub(r"\s+", " ", text).strip()[:3000]
+
+            # ── Structured content extraction ──────────────────────────────
+            # Keep heading labels so the script generator understands structure
+            # (e.g. which product names are section headings vs body copy).
+            structured_lines = []
+            for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
+                text = tag.get_text(separator=" ", strip=True)
+                if len(text) < 30:          # skip boilerplate fragments
+                    continue
+                if tag.name in ("h1", "h2", "h3", "h4"):
+                    structured_lines.append(f"\n## {text}")
+                else:
+                    structured_lines.append(text)
+
+            structured = "\n".join(structured_lines)
+            # Collapse excessive whitespace while keeping paragraph breaks
+            structured = re.sub(r"\n{3,}", "\n\n", structured).strip()[:3000]
 
             STATE.article_title   = article_title
             STATE.article_url     = article_url
-            STATE.article_content = text
+            STATE.article_content = structured
+            STATE.article_post_id = post["id"]
 
             return {
-                "success":         True,
-                "title":           article_title,
-                "length":          len(text),
-                "links_found":     len(unique_links)
+                "success":     True,
+                "title":       article_title,
+                "post_id":     post["id"],
+                "length":      len(structured),
+                "links_found": len(unique_links),
             }
         return {"error": "Article not found", "success": False}
     except Exception as e:
@@ -229,30 +268,62 @@ def fetch_article_content(article_url, article_title):
 
 
 def generate_video_script():
+    """
+    Generates a conversational German script with light humor.
+    - Passes the full 3 000-char structured content.
+    - Explicitly forbids AI-hedging phrases ("laut Bewertungen", etc.).
+    - Requires first-person voice and concrete model names / prices.
+    - Requires an honest pro AND con to sound credible.
+    - Adds light, relatable humor — one self-aware joke or analogy per script.
+    """
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
+            headers={
+                "x-api-key":         ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json",
+            },
             json={
-                "model": "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-6",
                 "max_tokens": 800,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Erstelle ein deutsches Video-Skript (60-90 Sekunden) basierend auf diesem Artikel:\n\n"
-                        f"Titel: {STATE.article_title}\n"
-                        f"Inhalt: {STATE.article_content[:1500]}\n\n"
-                        f"Das Skript soll:\n"
-                        f"- Mit einem starken Hook beginnen (Frage oder überraschende Aussage)\n"
-                        f"- 3 wichtigste Erkenntnisse nennen\n"
-                        f"- Konkrete Produktempfehlungen erwähnen\n"
-                        f"- Mit Call-to-Action enden: 'Alle Links findest du in der Videobeschreibung und den vollständigen Test auf heimbuero-test.de'\n"
-                        f"- Natürlich und gesprächig klingen\n"
-                        f"- Maximal 200 Wörter\n"
-                        f"- KEIN [Pause] oder Regieanweisungen — nur reiner Sprechtext\n\n"
-                        f"Gib nur den Skripttext aus."
+                        f"Erstelle ein deutsches Video-Skript (60–90 Sekunden Sprechzeit) "
+                        f"basierend auf diesem Artikel:\n\n"
+                        f"Titel: {STATE.article_title}\n\n"
+                        f"Artikelinhalt:\n{STATE.article_content}\n\n"
+                        f"=== ANFORDERUNGEN ===\n"
+                        f"- Beginne mit einem starken Hook: eine konkrete Frage oder "
+                        f"  eine überraschende Zahl/Aussage aus dem Artikel.\n"
+                        f"- Nenne mindestens ein konkretes Produktmodell mit Preis "
+                        f"  (z. B. 'Der FlexiSpot E7 kostet rund 400 Euro und …').\n"
+                        f"- Nenne einen echten Vorteil UND einen echten Nachteil — "
+                        f"  das klingt glaubwürdig.\n"
+                        f"- Schreib in der Ich-Form, locker und direkt, "
+                        f"  als würde jemand einem Freund einen Tipp geben.\n"
+                        f"- Schluss mit: 'Alle Links findest du in der Videobeschreibung "
+                        f"  — und den vollständigen Test auf heimbuero-test.de.'\n"
+                        f"- Maximal 200 Wörter.\n"
+                        f"- KEINE Regieanweisungen, KEIN [Pause], nur reiner Sprechtext.\n\n"
+                        f"=== HUMOR ===\n"
+                        f"Bau genau DREI humorvolle Momente ein — verteilt über das Skript, "
+                        f"nicht alle auf einmal. Stil: trocken, selbstironisch oder mit einer "
+                        f"alltagsnahen Analogie. Beispiele für den richtigen Ton:\n"
+                        f"- Hook: 'Der Rücken beschwert sich seit 2020. Und er hat recht.'\n"
+                        f"- Mitte: 'Kurbeltische klingen gut im Prospekt — und werden dann nie "
+                        f"  benutzt. Wie das Laufband im Keller.'\n"
+                        f"- Ende: kurzes trockenes Understatement, z.B. 'Zahlt sich aus. Irgendwann.'\n"
+                        f"Kein Klamauk, kein Witz mit Pointe — eher ein Augenzwinkern. "
+                        f"Der Humor soll den Rhythmus auflockern, nicht vom Inhalt ablenken.\n\n"
+                        f"=== VERBOTEN ===\n"
+                        f"Verwende KEINE dieser Phrasen (sie klingen nach KI-Text):\n"
+                        f"'laut Bewertungen', 'laut Amazon-Bewertungen', "
+                        f"'basierend auf Kundenfeedback', 'Käufer berichten', "
+                        f"'Nutzer berichten', 'Experten empfehlen', 'laut Produktdaten', "
+                        f"'In der Praxis berichten', 'Herstellerangaben zufolge'.\n\n"
+                        f"Gib NUR den fertigen Skripttext aus, nichts anderes."
                     )
                 }]
             },
@@ -260,8 +331,12 @@ def generate_video_script():
         )
         data = r.json()
         if "content" in data:
-            STATE.script = data["content"][0]["text"]
-            return {"success": True, "script": STATE.script, "word_count": len(STATE.script.split())}
+            STATE.script = data["content"][0]["text"].strip()
+            return {
+                "success":    True,
+                "script":     STATE.script,
+                "word_count": len(STATE.script.split()),
+            }
         return {"error": "API error", "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
@@ -427,7 +502,6 @@ def assemble_video():
 
         clip_duration = audio_duration / len(valid_clips)
 
-        # Trim each clip
         trimmed_clips = []
         for i, clip in enumerate(valid_clips):
             trimmed = os.path.join(TEMP_DIR, f"trimmed_{i}.mp4")
@@ -445,10 +519,8 @@ def assemble_video():
         if not trimmed_clips:
             return {"error": "All clip trimming failed", "success": False}
 
-        # Loop clips to cover full audio duration
-        single_pass = len(trimmed_clips) * clip_duration
+        single_pass  = len(trimmed_clips) * clip_duration
         loops_needed = int(audio_duration / single_pass) + 2
-        print(f"[Assemble] Looping {len(trimmed_clips)} clips x{loops_needed} to cover {audio_duration:.1f}s")
 
         concat_file  = os.path.join(TEMP_DIR, "concat.txt")
         concat_video = os.path.join(TEMP_DIR, "concat_video.mp4")
@@ -467,7 +539,6 @@ def assemble_video():
         if not os.path.exists(concat_video) or os.path.getsize(concat_video) < 1000:
             return {"error": "Video concatenation failed", "success": False}
 
-        # Generate subtitles
         srt_path = os.path.join(TEMP_DIR, "subtitles.srt")
         words    = STATE.script.split()
         chunk    = 8
@@ -482,7 +553,6 @@ def assemble_video():
                 f.write(f"{_fmt_time(start)} --> {_fmt_time(end)}\n")
                 f.write(f"{text}\n\n")
 
-        # Final merge
         final_path = os.path.join(TEMP_DIR, "final_video.mp4")
         result = subprocess.run([
             "ffmpeg", "-y",
@@ -514,9 +584,6 @@ def create_vertical_video():
 
     try:
         vertical_path = os.path.join(TEMP_DIR, "vertical_video.mp4")
-
-        # Scale original to fill 1080x1920 and blur it as background,
-        # then overlay the original scaled to 1080 wide, centred vertically.
         result = subprocess.run([
             "ffmpeg", "-y", "-i", STATE.final_video,
             "-filter_complex",
@@ -533,7 +600,6 @@ def create_vertical_video():
         if os.path.exists(vertical_path) and os.path.getsize(vertical_path) > 10000:
             STATE.vertical_video = vertical_path
             size_mb = os.path.getsize(vertical_path) / (1024 * 1024)
-            print(f"[Vertical] Created 9:16 video: {size_mb:.1f}MB")
             return {"success": True, "path": vertical_path, "size_mb": round(size_mb, 1)}
 
         stderr = result.stderr.decode("utf-8", errors="ignore")[-300:]
@@ -551,7 +617,6 @@ def generate_thumbnail():
         img  = Image.new("RGB", (W, H), (10, 15, 30))
         draw = ImageDraw.Draw(img)
 
-        # Try to fetch background photo from Pexels
         bg_query = STATE.article_title.split()[0] if STATE.article_title else "home office"
         try:
             r = requests.get(
@@ -569,14 +634,11 @@ def generate_thumbnail():
                     dark = Image.new("RGB", (W, H), (0, 0, 0))
                     img  = Image.blend(bg, dark, alpha=0.6)
                     draw = ImageDraw.Draw(img)
-                    print("[Thumbnail] Background fetched")
         except Exception as e:
             print(f"[Thumbnail] Background failed: {e}")
 
-        # Blue left accent bar
         draw.rectangle([0, 0, 14, H], fill=(37, 99, 235))
 
-        # Fonts
         font_path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
         font_reg  = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
         try:
@@ -586,24 +648,19 @@ def generate_thumbnail():
         except Exception:
             font_big = font_med = font_small = ImageFont.load_default()
 
-        # Title text
         title = STATE.article_title[:70]
         lines = textwrap.wrap(title, width=24)[:2]
         if not lines:
             lines = ["Heimbuero Test"]
-        y     = 160
+        y = 160
         for line in lines:
             draw.text((92, y + 4), line, font=font_big, fill=(0, 0, 0))
             draw.text((88, y),     line, font=font_big, fill=(255, 255, 255))
             y += 96
 
-        # Blue underline
         draw.rectangle([88, y + 8, min(88 + len(lines[0]) * 40, W - 60), y + 14], fill=(37, 99, 235))
-
-        # Subtitle
         draw.text((88, y + 28), "Vollständiger Test auf heimbuero-test.de", font=font_small, fill=(150, 200, 255))
 
-        # Brand badge
         bx = W - 400
         by = H - 82
         draw.rectangle([bx, by, W - 20, H - 20], fill=(37, 99, 235))
@@ -612,7 +669,6 @@ def generate_thumbnail():
         thumb_path = os.path.join(TEMP_DIR, "thumbnail.jpg")
         img.save(thumb_path, "JPEG", quality=95)
         STATE.thumbnail_path = thumb_path
-        print(f"[Thumbnail] Saved: {thumb_path}")
         return {"success": True, "path": thumb_path}
 
     except Exception as e:
@@ -628,12 +684,10 @@ def upload_to_youtube():
 
         if not STATE.final_video or not os.path.exists(STATE.final_video):
             return {"error": "No video file to upload", "success": False}
-
         if not YOUTUBE_TOKEN_JSON:
             return {"error": "YOUTUBE_TOKEN_JSON not set", "success": False}
 
         token_data = json.loads(YOUTUBE_TOKEN_JSON)
-
         creds = Credentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
@@ -642,183 +696,105 @@ def upload_to_youtube():
             client_secret=YOUTUBE_CLIENT_SECRET,
             scopes=["https://www.googleapis.com/auth/youtube.upload"]
         )
-
         try:
             creds.refresh(Request())
-            print("[YouTube] Token refreshed")
         except Exception as e:
             print(f"[YouTube] Token refresh error: {e}")
 
         youtube = build("youtube", "v3", credentials=creds)
 
-        # ─────────────────────────────────────────────────────────────
-        # CLEAN AFFILIATE LINKS
-        # ─────────────────────────────────────────────────────────────
-
-        clean_links = []
-        seen = set()
-
+        # Clean affiliate links
+        clean_links, seen = [], set()
         for link in STATE.affiliate_links:
             if not link:
                 continue
-
-            link = link.strip()
-
-            # Ensure https
+            link = re.sub(r"\s+", "", link.strip())
             if link.startswith("http://"):
-                link = link.replace("http://", "https://")
-
-            # Remove whitespace
-            link = re.sub(r"\s+", "", link)
-
-            # Skip invalid URLs
+                link = "https://" + link[7:]
             if not link.startswith("https://"):
                 continue
-
-            # Remove some tracking garbage
             link = link.split("#")[0]
-
-            # Avoid duplicates
             if link not in seen:
                 seen.add(link)
                 clean_links.append(link)
 
-        # ─────────────────────────────────────────────────────────────
-        # SHORT SCRIPT
-        # ─────────────────────────────────────────────────────────────
-
-        short_script = STATE.script.strip()
-
-        # ─────────────────────────────────────────────────────────────
-        # BUILD PRODUCT LINKS SECTION
-        # ─────────────────────────────────────────────────────────────
-
         links_section = ""
-
         if clean_links:
-            links_section += "Produkt-Links:\n\n"
+            links_section = "Produkt-Links:\n\n" + "\n\n".join(clean_links) + "\n\n"
 
-            for link in clean_links:
-                links_section += f"{link}\n\n"
-
-        # ─────────────────────────────────────────────────────────────
-        # DESCRIPTION
-        # IMPORTANT: LINKS FIRST
-        # ─────────────────────────────────────────────────────────────
+        # Use a 2-sentence summary for the description body instead of
+        # dumping the full script verbatim (avoids AI-hedging language in YT).
+        script_sentences = [s.strip() for s in STATE.script.split(".") if len(s.strip()) > 20]
+        short_summary = ". ".join(script_sentences[:2]) + "." if script_sentences else STATE.script[:200]
 
         description = (
             f"Vollständiger Test:\n\n"
             f"{STATE.article_url}\n\n"
-
             f"Mehr Homeoffice-Tipps:\n\n"
             f"https://heimbuero-test.de/\n\n"
-
             f"{links_section}"
-
-            f"{short_script}\n\n"
-
+            f"{short_summary}\n\n"
             f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )
 
-        # ─────────────────────────────────────────────────────────────
-        # SAFE DESCRIPTION LIMIT
-        # NEVER CUT URLS
-        # ─────────────────────────────────────────────────────────────
-
-        MAX_DESC = 4900  # YouTube hard limit is 5000; leave 100 chars headroom
-
+        MAX_DESC = 4900
         if len(description) > MAX_DESC:
-            # Links are at the top so truncate from the end (script/hashtags)
             description = description[:MAX_DESC]
-            last_newline = description.rfind("\n")
-            if last_newline != -1:
-                description = description[:last_newline]
+            last_nl = description.rfind("\n")
+            if last_nl != -1:
+                description = description[:last_nl]
 
         title = f"{STATE.article_title} | Heimbuero Test"
-
-        tags = [
-            "Homeoffice",
-            "Büro",
-            "Test",
-            "Vergleich",
-            "Deutschland",
-            "Heimarbeit",
-            "Bürostuhl",
-            "Monitor",
-            "Schreibtisch",
-            STATE.article_title
+        tags  = [
+            "Homeoffice", "Büro", "Test", "Vergleich", "Deutschland",
+            "Heimarbeit", "Bürostuhl", "Monitor", "Schreibtisch",
+            STATE.article_title,
         ]
 
         body = {
             "snippet": {
-                "title": title[:100],
-                "description": description,
-                "tags": tags,
-                "categoryId": "28",
-                "defaultLanguage": "de"
+                "title":           title[:100],
+                "description":     description,
+                "tags":            tags,
+                "categoryId":      "28",
+                "defaultLanguage": "de",
             },
             "status": {
-                "privacyStatus": "public",
-                "selfDeclaredMadeForKids": False
-            }
+                "privacyStatus":           "public",
+                "selfDeclaredMadeForKids": False,
+            },
         }
 
-        media = MediaFileUpload(
-            STATE.final_video,
-            mimetype="video/mp4",
-            resumable=True,
-            chunksize=1024 * 1024 * 5
-        )
-
-        request = youtube.videos().insert(
-            part="snippet,status",
-            body=body,
-            media_body=media
-        )
+        media   = MediaFileUpload(STATE.final_video, mimetype="video/mp4", resumable=True, chunksize=1024*1024*5)
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
         response = None
-
         while response is None:
             status, response = request.next_chunk()
-
             if status:
                 print(f"[YouTube] Upload: {int(status.progress() * 100)}%")
 
-        video_id = response["id"]
+        video_id  = response["id"]
         video_url = f"https://youtube.com/watch?v={video_id}"
-
         print(f"[YouTube] Live: {video_url}")
-
-        # ─────────────────────────────────────────────────────────────
-        # THUMBNAIL
-        # ─────────────────────────────────────────────────────────────
 
         if STATE.thumbnail_path and os.path.exists(STATE.thumbnail_path):
             try:
                 youtube.thumbnails().set(
                     videoId=video_id,
-                    media_body=MediaFileUpload(
-                        STATE.thumbnail_path,
-                        mimetype="image/jpeg"
-                    )
+                    media_body=MediaFileUpload(STATE.thumbnail_path, mimetype="image/jpeg")
                 ).execute()
-
-                print("[YouTube] Thumbnail uploaded")
-
             except Exception as e:
                 print(f"[YouTube] Thumbnail failed: {e}")
 
-        return {
-            "success": True,
-            "video_id": video_id,
-            "url": video_url
-        }
+        # Mark this article as processed so future runs skip it
+        if STATE.article_post_id:
+            _save_processed_id(STATE.article_post_id)
+
+        return {"success": True, "video_id": video_id, "url": video_url}
 
     except Exception as e:
-        return {
-            "error": str(e),
-            "success": False
-        }
+        return {"error": str(e), "success": False}
 
 
 def upload_to_instagram():
@@ -846,15 +822,10 @@ def upload_to_instagram():
 
         video_size = os.path.getsize(video_path)
 
-        # Step 1: Create resumable upload container
         init_r = requests.post(
             f"https://graph.facebook.com/v21.0/{INSTAGRAM_USER_ID}/media",
             params={"access_token": INSTAGRAM_ACCESS_TOKEN},
-            json={
-                "media_type":  "REELS",
-                "upload_type": "resumable",
-                "caption":     caption
-            },
+            json={"media_type": "REELS", "upload_type": "resumable", "caption": caption},
             timeout=30
         )
         if init_r.status_code != 200:
@@ -863,30 +834,18 @@ def upload_to_instagram():
         init_data   = init_r.json()
         creation_id = init_data.get("id")
         upload_uri  = init_data.get("uri")
-
         if not creation_id or not upload_uri:
-            return {"error": f"No creation_id or uri in response: {init_data}", "success": False}
+            return {"error": f"No creation_id or uri: {init_data}", "success": False}
 
-        print(f"[Instagram] Container created: {creation_id}")
-
-        # Step 2: Upload video bytes
         with open(video_path, "rb") as f:
             upload_r = requests.post(
                 upload_uri,
-                headers={
-                    "Authorization": f"OAuth {INSTAGRAM_ACCESS_TOKEN}",
-                    "offset":        "0",
-                    "file_size":     str(video_size)
-                },
-                data=f,
-                timeout=300
+                headers={"Authorization": f"OAuth {INSTAGRAM_ACCESS_TOKEN}", "offset": "0", "file_size": str(video_size)},
+                data=f, timeout=300
             )
         if upload_r.status_code not in (200, 201):
             return {"error": f"Instagram upload failed: {upload_r.text[:200]}", "success": False}
 
-        print("[Instagram] Video uploaded, waiting for processing...")
-
-        # Step 3: Poll until processing is done (max ~100 s)
         for _ in range(10):
             time.sleep(10)
             status_r = requests.get(
@@ -896,13 +855,11 @@ def upload_to_instagram():
             )
             if status_r.status_code == 200:
                 status = status_r.json().get("status_code")
-                print(f"[Instagram] Processing status: {status}")
                 if status == "FINISHED":
                     break
                 if status == "ERROR":
                     return {"error": "Instagram video processing failed", "success": False}
 
-        # Step 4: Publish
         pub_r = requests.post(
             f"https://graph.facebook.com/v21.0/{INSTAGRAM_USER_ID}/media_publish",
             params={"access_token": INSTAGRAM_ACCESS_TOKEN},
@@ -910,10 +867,7 @@ def upload_to_instagram():
             timeout=30
         )
         if pub_r.status_code == 200:
-            media_id = pub_r.json().get("id")
-            print(f"[Instagram] Published Reel: {media_id}")
-            return {"success": True, "media_id": media_id}
-
+            return {"success": True, "media_id": pub_r.json().get("id")}
         return {"error": f"Instagram publish failed: {pub_r.text[:200]}", "success": False}
 
     except Exception as e:
@@ -932,32 +886,19 @@ def upload_to_tiktok():
     if not video_path or not os.path.exists(video_path):
         return {"error": "No video file to upload", "success": False}
 
-    print(f"[TikTok] Using {'vertical' if video_path == STATE.vertical_video else 'landscape'} video")
-
     try:
-        headers = {
-            "Authorization":  f"Bearer {TIKTOK_ACCESS_TOKEN}",
-            "Content-Type":   "application/json; charset=UTF-8"
-        }
+        headers    = {"Authorization": f"Bearer {TIKTOK_ACCESS_TOKEN}", "Content-Type": "application/json; charset=UTF-8"}
         video_size = os.path.getsize(video_path)
 
-        # Step 1: Query creator info for allowed privacy levels
         privacy_level = "PUBLIC_TO_EVERYONE"
         try:
-            creator_r = requests.post(
-                "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-                headers=headers,
-                json={},
-                timeout=15
-            )
-            if creator_r.status_code == 200:
-                allowed = creator_r.json().get("data", {}).get("privacy_level_options", [])
+            cr = requests.post("https://open.tiktokapis.com/v2/post/publish/creator_info/query/", headers=headers, json={}, timeout=15)
+            if cr.status_code == 200:
+                allowed = cr.json().get("data", {}).get("privacy_level_options", [])
                 if allowed:
                     privacy_level = allowed[0]
         except Exception as e:
-            print(f"[TikTok] Creator info error (using default): {e}")
-
-        print(f"[TikTok] Privacy level: {privacy_level}")
+            print(f"[TikTok] Creator info error: {e}")
 
         description = (
             f"{' '.join(STATE.script.split()[:80])}\n\n"
@@ -965,7 +906,6 @@ def upload_to_tiktok():
             f"#Homeoffice #Büro #Test #Deutschland #Heimarbeit"
         )[:2200]
 
-        # Step 2: Initialise upload
         init_r = requests.post(
             "https://open.tiktokapis.com/v2/post/publish/video/init/",
             headers=headers,
@@ -977,14 +917,14 @@ def upload_to_tiktok():
                     "disable_duet":             False,
                     "disable_comment":          False,
                     "disable_stitch":           False,
-                    "video_cover_timestamp_ms": 1000
+                    "video_cover_timestamp_ms": 1000,
                 },
                 "source_info": {
                     "source":            "FILE_UPLOAD",
                     "video_size":        video_size,
                     "chunk_size":        video_size,
-                    "total_chunk_count": 1
-                }
+                    "total_chunk_count": 1,
+                },
             },
             timeout=30
         )
@@ -994,28 +934,18 @@ def upload_to_tiktok():
         data       = init_r.json().get("data", {})
         publish_id = data.get("publish_id")
         upload_url = data.get("upload_url")
-
         if not publish_id or not upload_url:
             return {"error": f"No publish_id or upload_url: {data}", "success": False}
 
-        print(f"[TikTok] Upload initialised: {publish_id}")
-
-        # Step 3: Upload video (single chunk)
         with open(video_path, "rb") as f:
             upload_r = requests.put(
                 upload_url,
-                headers={
-                    "Content-Type":   "video/mp4",
-                    "Content-Range":  f"bytes 0-{video_size - 1}/{video_size}",
-                    "Content-Length": str(video_size)
-                },
-                data=f,
-                timeout=300
+                headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{video_size-1}/{video_size}", "Content-Length": str(video_size)},
+                data=f, timeout=300
             )
         if upload_r.status_code not in (200, 201):
             return {"error": f"TikTok upload failed: {upload_r.text[:200]}", "success": False}
 
-        print(f"[TikTok] Uploaded — publish_id: {publish_id}")
         return {"success": True, "publish_id": publish_id}
 
     except Exception as e:
@@ -1068,7 +998,8 @@ Goal: Take a published article, create a German video, and post it to YouTube, I
 YOUR EXACT WORKFLOW — follow this order strictly:
 
 1. get_latest_articles
-2. Pick the most recent article
+2. Pick the most recent article where already_processed is false. If ALL articles
+   are already processed, send_telegram_message to notify the owner and stop.
 3. fetch_article_content
 4. generate_video_script
 5. send_approval_request — wait for YES or NO
@@ -1078,13 +1009,14 @@ YOUR EXACT WORKFLOW — follow this order strictly:
    c. assemble_video — ONLY call after BOTH a and b return success:true
    d. generate_thumbnail — call after assemble_video; failure is NOT a reason to stop
    e. create_vertical_video — re-encodes 16:9 to 9:16 for Instagram/TikTok; failure is NOT a reason to stop
-   f. upload_to_youtube — uses original landscape video
+   f. upload_to_youtube — uses original landscape video; also marks article as processed
    g. upload_to_instagram — uses vertical video (falls back to landscape); failure is NOT a reason to stop
    h. upload_to_tiktok — uses vertical video (falls back to landscape); failure is NOT a reason to stop
    i. send_telegram_message — report all results: YouTube URL, Instagram media_id, TikTok publish_id
 7. If not approved: send_telegram_message confirming skip, stop.
 
 CRITICAL RULES:
+- NEVER pick an article where already_processed is true
 - NEVER call assemble_video until BOTH generate_voiceover AND fetch_video_clips return success:true
 - fetch_video_clips search query MUST be in English
 - Always fetch at least 3-4 video clips
@@ -1113,16 +1045,18 @@ def run_agent():
 
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "anthropic-beta": "prompt-caching-2024-07-31",
-                     "content-type": "application/json"},
+            headers={
+                "x-api-key":         ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta":    "prompt-caching-2024-07-31",
+                "content-type":      "application/json",
+            },
             json={
-                "model":      "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-20250514",
                 "max_tokens": 1000,
                 "system":     [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":      TOOLS,
-                "messages":   messages
+                "messages":   messages,
             },
             timeout=60
         ).json()
@@ -1159,7 +1093,7 @@ def run_agent():
                 tool_results.append({
                     "type":        "tool_result",
                     "tool_use_id": tool_id,
-                    "content":     json.dumps(result, ensure_ascii=False)
+                    "content":     json.dumps(result, ensure_ascii=False),
                 })
 
         if tool_results:
