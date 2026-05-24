@@ -426,6 +426,18 @@ def write_article():
                         f"- Ein Budget-Alternative nennt\n"
                         f"- Einen Satz dazu schreibt, für wen sich keines der Produkte lohnt\n\n"
 
+                        f"=== HUMOR ===\n"
+                        f"Bau genau DREI humorvolle Momente ein — verteilt über den Artikel, "
+                        f"nicht alle auf einmal. Stil: trocken, selbstironisch, alltagsnah. "
+                        f"Beispiele für den richtigen Ton:\n"
+                        f"- Intro: 'Der Rücken beschwert sich seit 2020. Er hat recht.'\n"
+                        f"- Mitte: 'Kurbeltische klingen gut im Prospekt — und werden dann nie "
+                        f"  benutzt. Wie das Laufband im Keller.'\n"
+                        f"- Ende: kurzes trockenes Understatement, "
+                        f"  z.B. 'Zahlt sich aus. Irgendwann.'\n"
+                        f"Kein Klamauk, kein Witz mit Pointe — ein Augenzwinkern das den "
+                        f"Lesefluss auflockert ohne den informativen Ton zu brechen.\n\n"
+
                         f"=== ABSOLUT VERBOTEN ===\n"
                         f"Diese Phrasen machen den Artikel wertlos — niemals verwenden:\n\n"
                         f"Fake-Quellen (klingen nach KI, bieten keinen Mehrwert):\n"
