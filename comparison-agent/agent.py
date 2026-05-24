@@ -16,12 +16,9 @@ UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 SERPAPI_KEY         = os.environ.get("SERPAPI_KEY")
 WP_CATEGORY_ID      = int(os.environ.get("WP_CATEGORY_ID", "4"))
 
-# Content style: always "research" — agent is a researcher, never a tester
-CONTENT_STYLE = "research"
-
 MAX_ITERATIONS = 24
 
-# ── Categories and rotation ────────────────────────────────────────────────────
+# ── Categories ─────────────────────────────────────────────────────────────────
 CATEGORIES = [
     "Bürostuhl",
     "Monitor",
@@ -38,8 +35,8 @@ CATEGORIES = [
 class ComparisonState:
     def __init__(self):
         self.category         = ""
-        self.products         = []       # list of product names to compare
-        self.product_specs    = {}       # dict: product name → spec summary
+        self.products         = []
+        self.product_specs    = {}   # product name → raw spec summary (clean, no hedges)
         self.comparison_title = ""
         self.outline          = ""
         self.image_html       = ""
@@ -62,10 +59,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query for Google.de"
-                }
+                "query": {"type": "string", "description": "Search query for Google.de"}
             },
             "required": ["query"]
         }
@@ -74,14 +68,14 @@ TOOLS = [
         "name": "fetch_product_specs",
         "description": (
             "Searches Google for real specs, price, pros and cons of a specific product. "
-            "Returns a structured summary of what reviewers and users say about it. "
-            "Sources: Amazon reviews, manufacturer data, third-party test reports."
+            "Returns a clean structured summary of facts from reviews and manufacturer data. "
+            "Call this for EACH product before write_comparison_article."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "product_name": {"type": "string", "description": "Full product name e.g. 'Herman Miller Aeron'"},
-                "category": {"type": "string", "description": "Product category e.g. 'Bürostuhl'"}
+                "category":     {"type": "string", "description": "Product category e.g. 'Bürostuhl'"}
             },
             "required": ["product_name", "category"]
         }
@@ -95,27 +89,27 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "category":         {"type": "string", "description": "The product category e.g. Bürostuhl"},
+                "category":         {"type": "string"},
                 "products":         {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "List of 2-5 product names to compare"
                 },
-                "comparison_title": {"type": "string", "description": "German article title ≤70 characters e.g. 'Aeron vs Leap: Welcher Bürostuhl lohnt 2026?'"},
-                "reason":           {"type": "string", "description": "Why this comparison is a good opportunity (search volume, competition gap, trending)"}
+                "comparison_title": {"type": "string", "description": "German article title ≤70 chars"},
+                "reason":           {"type": "string"}
             },
             "required": ["category", "products", "comparison_title", "reason"]
         }
     },
     {
         "name": "write_comparison_outline",
-        "description": "Generates a structured outline for the research-based comparison article using stored state.",
+        "description": "Generates a structured outline for the comparison article using stored state.",
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "send_approval_request",
         "description": (
-            "Sends the comparison details and outline to the owner on Telegram for approval. "
+            "Sends comparison details and outline to the owner on Telegram for approval. "
             "Waits for YES or NO. Returns approved: true/false."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
@@ -128,19 +122,17 @@ TOOLS = [
     {
         "name": "write_comparison_article",
         "description": (
-            "Writes the full research-based comparison article using stored state (products, specs, outline). "
-            "Includes comparison table, pros/cons per product, verdict, and affiliate links. "
-            "All claims sourced from user reviews and manufacturer data — no fake test claims. "
-            "Stores article HTML in state."
+            "Writes the full comparison article using stored state. "
+            "Stores article HTML in state. Returns word count."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
     {
         "name": "validate_article",
         "description": (
-            "Scans the article HTML for forbidden fake-test phrases before publishing. "
-            "Returns pass: true/false and a list of violations if any found. "
-            "Must be called after write_comparison_article and before publish_article."
+            "Scans the article HTML for forbidden phrases — both fake-test claims AND "
+            "AI-sourcing hedges. Returns pass: true/false. "
+            "Mandatory before publish_article."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
@@ -154,9 +146,7 @@ TOOLS = [
         "description": "Sends a plain notification message to the owner on Telegram.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "message": {"type": "string"}
-            },
+            "properties": {"message": {"type": "string"}},
             "required": ["message"]
         }
     }
@@ -205,6 +195,14 @@ def search_google(query):
 
 
 def fetch_product_specs(product_name, category):
+    """
+    Fetches real search snippets about the product, then asks Claude to distil
+    them into clean factual bullet points — WITHOUT sourcing hedges.
+
+    The hedges were the problem in the original: specs containing "laut Bewertungen"
+    were fed into write_comparison_article, which then reproduced them verbatim.
+    Now specs are stored as clean facts; the article prompt decides how to frame them.
+    """
     try:
         query = f"{product_name} {category} Erfahrungen Bewertungen Vor- Nachteile Preis 2026"
         r = requests.get("https://serpapi.com/search", params={
@@ -221,20 +219,18 @@ def fetch_product_specs(product_name, category):
         ]
         paa = [q.get("question") for q in data.get("related_questions", [])[:4]]
 
-        # Ask Claude to summarise specs from real search results
         summary_prompt = (
-            f"Du bist ein Produktrechercheur. Fasse folgende Suchergebnisse über "
-            f"'{product_name}' als {category} zusammen.\n\n"
+            f"Fasse diese Suchergebnisse über '{product_name}' ({category}) zusammen.\n\n"
             f"Gib zurück:\n"
-            f"- Preis (ca., laut Marktdaten)\n"
-            f"- 3 Vorteile (laut Nutzerbewertungen und Testberichten)\n"
-            f"- 3 Nachteile (laut Nutzerbewertungen und Testberichten)\n"
-            f"- Für wen geeignet\n\n"
+            f"- Preis (ca., laut Marktdaten — konkrete Zahl wenn vorhanden)\n"
+            f"- 3 Vorteile (konkrete Fakten, keine vagen Aussagen)\n"
+            f"- 3 Nachteile (konkrete Fakten, keine vagen Aussagen)\n"
+            f"- Für wen geeignet (ein konkreter Satz)\n\n"
             f"Suchergebnisse:\n" + "\n".join(snippets) +
             f"\nHäufige Fragen: {paa}\n\n"
-            f"WICHTIG: Formuliere immer mit Quellenangabe: 'laut Bewertungen', "
-            f"'laut Hersteller', 'Nutzer berichten', 'laut Produktdaten'.\n"
-            f"Erfinde KEINE Messwerte oder Testergebnisse.\n"
+            f"Schreibe DIREKTE FAKTEN — keine Quellenfloskeln wie "
+            f"'laut Bewertungen', 'Nutzer berichten', 'laut Produktdaten'.\n"
+            f"Erfinde KEINE Messwerte. Wenn ein Wert unbekannt ist, lass ihn weg.\n"
             f"Antworte auf Deutsch, kurz und strukturiert."
         )
 
@@ -244,9 +240,9 @@ def fetch_product_specs(product_name, category):
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-6",
                 "max_tokens": 400,
-                "messages": [{"role": "user", "content": summary_prompt}]
+                "messages":   [{"role": "user", "content": summary_prompt}]
             },
             timeout=30
         )
@@ -266,19 +262,14 @@ def set_comparison(category, products, comparison_title, reason):
     STATE.comparison_title = comparison_title
     STATE.reason           = reason
     print(f"[State] Comparison set: {comparison_title}")
-    return {
-        "success": True,
-        "category": category,
-        "products": products,
-        "title": comparison_title
-    }
+    return {"success": True, "category": category, "products": products, "title": comparison_title}
 
 
 def write_comparison_outline():
     try:
         products_str = " vs ".join(STATE.products)
         specs_str = "\n\n".join([
-            f"{p}:\n{STATE.product_specs.get(p, 'Specs noch nicht geladen')}"
+            f"### {p}\n{STATE.product_specs.get(p, 'Specs noch nicht geladen')}"
             for p in STATE.products
         ])
 
@@ -288,24 +279,21 @@ def write_comparison_outline():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-6",
                 "max_tokens": 600,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Erstelle eine Gliederung für einen RECHERCHE-BASIERTEN deutschen Vergleichsartikel.\n"
-                        f"Dies ist ein Kaufratgeber — KEIN persönlicher Testbericht.\n\n"
+                        f"Erstelle eine Gliederung für einen deutschen Vergleichsartikel.\n\n"
                         f"Titel: '{STATE.comparison_title}'\n"
                         f"Produkte: {products_str}\n\n"
-                        f"Produktinfos aus Recherche:\n{specs_str}\n\n"
+                        f"Produktinfos:\n{specs_str}\n\n"
                         f"Die Gliederung soll enthalten:\n"
                         f"1. Schnellübersicht (Vergleichstabelle)\n"
-                        f"2. Je ein Abschnitt pro Produkt (Stärken laut Bewertungen, Schwächen laut Bewertungen, für wen?)\n"
-                        f"3. Direkter Vergleich nach Kategorien (Preis, Komfort laut Nutzern, Qualität laut Bewertungen)\n"
-                        f"4. Kaufempfehlung — wer sollte was kaufen (basierend auf Nutzerfeedback)\n"
-                        f"5. FAQ – Häufige Fragen zum Kauf\n\n"
-                        f"ERLAUBT: 'laut Bewertungen', 'Nutzer berichten', 'Kaufempfehlung', 'für wen geeignet'\n"
-                        f"VERBOTEN: 'Testurteil', 'unser Test', 'Praxistest', 'haben wir getestet', 'Testteam'\n\n"
+                        f"2. Je ein Abschnitt pro Produkt (Stärken, Schwächen, für wen?)\n"
+                        f"3. Direkter Vergleich nach Kategorien (Preis, Ergonomie, Qualität, Garantie)\n"
+                        f"4. Klare Kaufempfehlung — wer sollte was kaufen\n"
+                        f"5. FAQ\n\n"
                         f"Gib nur die Gliederungspunkte aus, kein weiterer Text."
                     )
                 }]
@@ -387,7 +375,6 @@ def fetch_image():
             "Laptop":        "office laptop"
         }
         query = english_map.get(STATE.category, f"{STATE.category} home office")
-        print(f"[Image] Searching Unsplash for: {query}")
 
         r = requests.get(
             "https://api.unsplash.com/search/photos",
@@ -420,6 +407,14 @@ def fetch_image():
 
 
 def write_comparison_article():
+    """
+    Key fixes vs original:
+    - Removed the mandatory AI-hedge phrase list ("PFLICHT-SCHREIBSTIL").
+    - Instead: write like a knowledgeable friend — specific, direct, opinionated.
+    - Required "Unser Fazit" section with a named winner and a named budget pick.
+    - Both fake-test AND AI-hedge phrases are in the banned list.
+    - specs fed in from fetch_product_specs are now clean facts, not pre-hedged text.
+    """
     try:
         products_str = " vs ".join(STATE.products)
         specs_str = "\n\n".join([
@@ -437,68 +432,68 @@ def write_comparison_article():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
+                "model":      "claude-sonnet-4-6",
                 "max_tokens": 8000,
                 "messages": [{
                     "role": "user",
                     "content": (
-                        f"Du bist ein Produktrechercheur für heimbuero-test.de. "
-                        f"Du hast die Produkte NICHT persönlich besessen, getestet oder ausprobiert.\n"
-                        f"Deine Quellen sind ausschließlich: Amazon.de Nutzerbewertungen, "
-                        f"Hersteller-Spezifikationen, Fachmedien und Testberichte Dritter "
-                        f"(z.B. CHIP, Computer Bild, Stiftung Warentest).\n\n"
-
-                        f"Schreibe einen ausführlichen deutschen Vergleichsartikel.\n\n"
+                        f"Schreibe einen deutschen Vergleichsartikel.\n\n"
                         f"Titel: {STATE.comparison_title}\n"
                         f"Produkte: {products_str}\n\n"
                         f"Produktinfos aus Recherche:\n{specs_str}\n\n"
                         f"Gliederung:\n{STATE.outline}\n\n"
 
-                        f"PFLICHT-ANFORDERUNGEN:\n"
-                        f"- Mindestens 1500 Wörter\n"
-                        f"- Beginne mit einer HTML-Vergleichstabelle: Produkt | Preis (laut Markt) | Beste für | Nutzerwertung\n"
-                        f"- Je ein H2-Abschnitt pro Produkt mit:\n"
-                        f"  ✅ Stärken (laut Nutzerbewertungen)\n"
-                        f"  ❌ Schwächen (laut Nutzerbewertungen)\n"
-                        f"- Direkter H2-Vergleich nach: Preis, Komfort laut Nutzern, Qualität laut Bewertungen, Garantie laut Hersteller\n"
-                        f"- Klare Kaufempfehlung: wer sollte welches Produkt kaufen (basierend auf Nutzerfeedback)\n"
-                        f"- Verwende das Jahr {datetime.now().year} — niemals frühere Jahre\n\n"
+                        f"=== ZIELGRUPPE ===\n"
+                        f"Heimarbeiter in Deutschland die eines dieser Produkte kaufen wollen "
+                        f"und eine klare, direkte Empfehlung suchen.\n\n"
 
-                        f"PFLICHT-SCHREIBSTIL — immer diese Quellenformulierungen verwenden:\n"
-                        f"- 'Laut Amazon-Bewertungen...'\n"
-                        f"- 'Der Hersteller gibt an...'\n"
-                        f"- 'Käufer berichten...'\n"
-                        f"- 'Laut Produktdaten...'\n"
-                        f"- 'Laut Nutzerbewertungen...'\n"
-                        f"- 'Basierend auf Kundenfeedback...'\n"
-                        f"- 'Experten empfehlen...'\n"
-                        f"- 'In der Praxis berichten Nutzer...'\n"
-                        f"- 'Unsere Empfehlung basiert auf...'\n\n"
+                        f"=== WAS GUTEN VERGLEICHS-INHALT AUSMACHT ===\n"
+                        f"Schreibe wie ein erfahrener Freund der beide Produkte kennt:\n"
+                        f"- Beginne mit einer HTML-Vergleichstabelle: "
+                        f"  Produkt | Preis ca. | Beste für | Kurzbewertung\n"
+                        f"- Pro Produkt: ein konkreter Hauptvorteil, ein konkreter Hauptnachteil\n"
+                        f"- Sage klar für wen jedes Produkt geeignet ist — und für wen nicht\n"
+                        f"- Vergleiche direkt nach Kategorien: Preis, Ergonomie, Verarbeitung, Garantie\n"
+                        f"- Gib eine klare Kaufempfehlung — nicht 'das kommt drauf an'\n"
+                        f"- Verwende das Jahr {datetime.now().year}\n"
+                        f"- Mindestens 1500 Wörter\n\n"
 
-                        f"ABSOLUT VERBOTEN — diese Phrasen niemals verwenden:\n"
-                        f"- 'haben wir getestet' / 'in unserem Test' / 'haben wir gemessen'\n"
-                        f"- 'im Praxistest' / 'unser Testsieger' / 'haben wir ausprobiert'\n"
-                        f"- 'unter realen Bedingungen getestet' / 'ausführlich getestet'\n"
-                        f"- 'auf Basis unserer Tests' / 'konnten wir feststellen'\n"
-                        f"- 'Testteam' / 'Testperson' / 'Testzeitraum'\n"
-                        f"- Erfundene Messwerte (Temperaturen, dB-Werte, exakte Akkulaufzeiten als eigene Messung)\n"
-                        f"- Sterne-Ratings oder Punktesysteme als eigene Bewertung\n"
-                        f"- Testszenarien die nie stattfanden\n\n"
+                        f"=== PFLICHTABSCHNITT: 'Unser Fazit' ===\n"
+                        f"Dieser Abschnitt muss enthalten:\n"
+                        f"- Ein klarer Gewinner mit einem Satz Begründung\n"
+                        f"- Eine Budget-Alternative (falls zutreffend)\n"
+                        f"- Einen Satz für wen keines der Produkte passt\n\n"
 
-                        f"AFFILIATE LINKS — für jedes Produkt einen Amazon-Link:\n"
+                        f"=== ABSOLUT VERBOTEN ===\n"
+                        f"Diese Phrasen sind verboten — sie machen den Artikel wertlos:\n\n"
+                        f"Fake-Quellen (KI-Signal, kein Mehrwert für Leser):\n"
+                        f"'laut Amazon-Bewertungen', 'laut Bewertungen', "
+                        f"'basierend auf Kundenfeedback', 'Käufer berichten', "
+                        f"'Nutzer berichten', 'Experten empfehlen', 'laut Produktdaten', "
+                        f"'In der Praxis berichten Nutzer', 'Herstellerangaben zufolge', "
+                        f"'Unsere Empfehlung basiert auf', 'laut Nutzerbewertungen'\n\n"
+                        f"Fake-Tests (nie stattgefunden):\n"
+                        f"'haben wir getestet', 'in unserem Test', 'haben wir gemessen', "
+                        f"'im Praxistest', 'unser Testsieger', 'haben wir ausprobiert', "
+                        f"'unter realen Bedingungen', 'ausführlich getestet', "
+                        f"'Testteam', 'Testperson', 'Testzeitraum'\n\n"
+
+                        f"=== AFFILIATE LINKS ===\n"
+                        f"Für jedes Produkt einen Amazon-Link:\n"
                         f"{amazon_links}\n"
-                        f"Format: <a href='LINK' rel='nofollow' target='_blank'>PRODUKTNAME auf Amazon ansehen</a>\n\n"
-                        f"OTTO Links — 1-2 einbauen wo passend:\n"
-                        f"Allgemein: <a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>"
+                        f"Format: <a href='LINK' rel='nofollow' target='_blank'>"
+                        f"PRODUKTNAME auf Amazon ansehen</a>\n\n"
+                        f"1-2 OTTO Links:\n"
+                        f"<a href='https://tidd.ly/4usYoRq' rel='nofollow' target='_blank'>"
                         f"Passende Produkte bei OTTO ansehen</a>\n"
-                        f"Büro: <a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>"
+                        f"<a href='https://tidd.ly/4wW7IPw' rel='nofollow' target='_blank'>"
                         f"Bürobedarf bei OTTO Office ansehen</a>\n\n"
 
-                        f"FORMAT:\n"
-                        f"- Professioneller, vertrauenswürdiger Ton\n"
-                        f"- Reines HTML mit H1/H2/H3, Tabellen, Listen\n"
+                        f"=== FORMAT ===\n"
+                        f"- Reines HTML: H1, H2, H3, table, ul, li\n"
                         f"- KEIN Markdown, KEINE Code-Blöcke, KEIN ```html\n"
-                        f"- Kein Affiliate-Disclaimer am Ende\n"
+                        f"- Kein Disclaimer am Ende\n"
+                        f"- H1 = Artikeltitel\n"
                     )
                 }]
             },
@@ -508,7 +503,8 @@ def write_comparison_article():
         if "content" in data:
             STATE.article_html = data["content"][0]["text"]
             word_count = len(STATE.article_html.split())
-            # Generate meta description with Haiku
+
+            # Meta description
             try:
                 meta_r = requests.post(
                     "https://api.anthropic.com/v1/messages",
@@ -516,7 +512,7 @@ def write_comparison_article():
                              "anthropic-version": "2023-06-01",
                              "content-type": "application/json"},
                     json={
-                        "model": "claude-sonnet-4-6",
+                        "model":      "claude-sonnet-4-6",
                         "max_tokens": 80,
                         "messages": [{
                             "role": "user",
@@ -524,8 +520,8 @@ def write_comparison_article():
                                 f"Schreibe eine Meta-Beschreibung auf Deutsch (120-155 Zeichen) für:\n"
                                 f"Titel: {STATE.comparison_title}\n"
                                 f"Produkte: {', '.join(STATE.products)}\n"
-                                f"Enthält das Hauptkeyword, beschreibt den Mehrwert als Kaufratgeber. "
-                                f"Nur die Beschreibung, kein Anführungszeichen, kein 'Test' oder 'getestet'."
+                                f"Enthält das Hauptkeyword, beschreibt den Mehrwert als Vergleich. "
+                                f"Nur die Beschreibung, kein Anführungszeichen."
                             )
                         }]
                     },
@@ -544,11 +540,13 @@ def write_comparison_article():
 
 def validate_article():
     """
-    Hard mechanical check for forbidden fake-test phrases.
-    Does not rely on the LLM to police itself — runs deterministically.
+    Checks for both forbidden categories:
+    1. Fake-test claims
+    2. AI-sourcing hedges (were *required* in the original — now blocked)
+
+    This is a deterministic phrase check — does not rely on the LLM.
     """
-    forbidden_phrases = [
-        # Fake testing claims
+    fake_test_phrases = [
         "haben wir getestet",
         "in unserem test",
         "haben wir gemessen",
@@ -564,7 +562,6 @@ def validate_article():
         "testteam",
         "testperson",
         "testpersonen",
-        # Fake measurement data
         "grad celsius",
         "db(a)",
         "haben wir ermittelt",
@@ -572,30 +569,51 @@ def validate_article():
         "unser test zeigt",
         "im test festgestellt",
         "haben wir überprüft",
-        # Fake scoring systems
         "von 100 punkten",
         "punkte vergeben",
         "testpunkte",
     ]
 
-    article_lower = STATE.article_html.lower()
-    violations = [phrase for phrase in forbidden_phrases if phrase in article_lower]
+    ai_hedge_phrases = [
+        "laut amazon-bewertungen",
+        "laut bewertungen",
+        "basierend auf kundenfeedback",
+        "käufer berichten",
+        "nutzer berichten",
+        "experten empfehlen",
+        "laut produktdaten",
+        "in der praxis berichten nutzer",
+        "herstellerangaben zufolge",
+        "unsere empfehlung basiert auf",
+        "laut nutzerbewertungen",
+        "laut kundenbewertungen",
+    ]
 
-    if violations:
-        print(f"[Validate] FAILED — {len(violations)} violation(s): {violations}")
+    article_lower = STATE.article_html.lower()
+    fake_test_violations = [p for p in fake_test_phrases if p in article_lower]
+    ai_hedge_violations  = [p for p in ai_hedge_phrases  if p in article_lower]
+    all_violations       = fake_test_violations + ai_hedge_violations
+
+    if all_violations:
+        print(f"[Validate] FAILED — {len(all_violations)} violation(s): {all_violations}")
         return {
-            "pass": False,
-            "violations": violations,
-            "violation_count": len(violations),
-            "action": "Article blocked. Call write_comparison_article again — the forbidden phrases above must not appear."
+            "pass":            False,
+            "fake_test":       fake_test_violations,
+            "ai_hedges":       ai_hedge_violations,
+            "violation_count": len(all_violations),
+            "action": (
+                "Article blocked. Call write_comparison_article again. "
+                "Both fake-test phrases and AI-hedging phrases are forbidden. "
+                "Replace them with specific model names, concrete prices, and direct opinions."
+            )
         }
 
     word_count = len(STATE.article_html.split())
     if word_count < 800:
         return {
-            "pass": False,
+            "pass":       False,
             "violations": ["article_too_short"],
-            "action": f"Article only {word_count} words. Minimum is 800. Call write_comparison_article again."
+            "action":     f"Only {word_count} words. Minimum 800. Call write_comparison_article again."
         }
 
     print(f"[Validate] PASSED — {word_count} words, no forbidden phrases.")
@@ -616,7 +634,7 @@ def _ping_search_engines():
 
 def publish_article():
     if not STATE.article_html.strip():
-        return {"success": False, "error": "No content — write_comparison_article must be called first"}
+        return {"success": False, "error": "No content — call write_comparison_article first"}
 
     schema = {
         "@context": "https://schema.org",
@@ -693,67 +711,54 @@ def dispatch_tool(name, inputs):
 
 def _system_prompt():
     return f"""You are an autonomous comparison article agent for heimbuero-test.de,
-a German home office product buying guide website. You compare products from well known
-companies which manufacture home office products.
+a German home office product buying guide website.
 
 Today: {datetime.now().strftime('%d.%m.%Y')}
-Content style: {CONTENT_STYLE} — you are a RESEARCHER, never a tester.
 
-━━━ IDENTITY ━━━
-You produce research-based buying guides and product comparisons.
-You have NEVER touched, owned, or tested any product. You aggregate information from:
-- Amazon.de user reviews
-- Manufacturer specifications
-- Third-party test reports (CHIP, Computer Bild, Stiftung Warentest, etc.)
-- Expert opinions from established tech media
+━━━ CONTENT STANDARD ━━━
+Write like a knowledgeable friend who knows both products well.
+Name specific models. Give concrete prices. Make a direct recommendation.
+Do NOT hide behind vague attribution language.
 
-Every product claim must include a source hedge:
-"laut Bewertungen", "laut Hersteller", "Nutzer berichten", "laut Produktdaten"
+The following phrases are banned from ALL content:
+Fake-sourcing: "laut Amazon-Bewertungen", "Käufer berichten", "Nutzer berichten",
+"basierend auf Kundenfeedback", "Experten empfehlen", "laut Produktdaten"
+Fake-testing: "haben wir getestet", "Testsieger", "im Praxistest", "Testteam"
 
-Never invent: temperatures, decibel values, battery runtimes measured by you,
-test scores, test team personas, or test scenarios that never happened.
-If you don't have a real sourced number, don't include it.
+validate_article checks for BOTH categories and will block the article if found.
 
-━━━ WORKFLOW — follow this exact order ━━━
+━━━ WORKFLOW ━━━
 
 PHASE 1 — RESEARCH:
-1. get_published_articles — check what's already published, avoid duplicates
-2. Pick a category not recently covered from the CATEGORIES list
-3. search_google for "beste [category] 2026 Vergleich" to find popular products
-4. search_google for "[product A] vs [product B]" to check competition gap
-5. fetch_product_specs for each product to compare (2-5 products max)
-6. set_comparison — commit to your choice with title, products list, and reason
+1. get_published_articles — avoid duplicate topics
+2. Pick a category from the list not recently covered
+3. search_google "beste [category] 2026 Vergleich" — find popular products
+4. search_google "[product A] vs [product B]" — check competition gap
+5. fetch_product_specs for EACH product (2-5 products max)
+6. set_comparison — commit with title, products list, and reason
 
 PHASE 2 — APPROVAL:
-7. write_comparison_outline — generates structured outline
-8. send_approval_request — sends to owner, waits for YES/NO
+7. write_comparison_outline
+8. send_approval_request — wait for YES/NO
 
 PHASE 3 — PUBLISH (only if approved=true):
-9.  fetch_image — gets category header image
-10. write_comparison_article — writes full research-based comparison
-11. validate_article — checks for forbidden fake-test phrases
+9.  fetch_image
+10. write_comparison_article
+11. validate_article
     - If pass=false: call write_comparison_article again, then validate_article again
-    - Only proceed when validate_article returns pass=true
-12. publish_article — combines image + article and publishes
-13. send_telegram_message — notify owner with success and URL
+    - Only proceed when pass=true
+12. publish_article
+13. send_telegram_message with the live URL
 
-If approved=false: send_telegram_message confirming skip, then stop.
+If approved=false: send_telegram_message confirming skip, stop.
 
-━━━ COMPARISON ARTICLE RULES ━━━
-- Always compare 2-5 real, well-known products with genuine search demand in Germany
-- Title format: "Produkt A vs Produkt B: Welcher [Kategorie] lohnt sich {datetime.now().year}?"
-  or "Top 3 [Kategorie]: [Brand] vs [Brand] vs [Brand] im Vergleich {datetime.now().year}"
-- Keep titles ≤70 characters — primary keyword first
-- Use "Vergleich" or "Kaufratgeber" in titles — avoid "Test" or "Testbericht"
-- Must include a comparison table and verdict based on user reviews
-- Affiliate links for EVERY product compared
-- Never pass article content between tools — publish_article reads from state directly
-- Never publish without approval
-
-━━━ IMPORTANT ━━━
-- validate_article is mandatory before publish_article — never skip it
-- If validate_article fails twice, send_telegram_message to owner explaining the issue and stop
-- fetch_product_specs must be called for EACH product before write_comparison_article"""
+━━━ RULES ━━━
+- fetch_product_specs must be called for EACH product before write_comparison_article
+- validate_article is mandatory — never skip it
+- If validate_article fails twice: notify owner and stop
+- Title ≤ 70 characters, primary keyword first
+- Use "Vergleich" in titles — avoid "Test" or "Testbericht"
+- Never publish without approval"""
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -768,8 +773,8 @@ def run_agent():
             f"Publish one comparison article for today. "
             f"Today is {datetime.now().strftime('%d.%m.%Y %H:%M')}. "
             f"Start by checking published articles, then research and pick the best comparison. "
-            f"Remember: you are a researcher, not a tester. "
-            f"validate_article is mandatory before publishing."
+            f"validate_article is mandatory — it now blocks both fake-test phrases "
+            f"AND AI-sourcing hedges like 'laut Amazon-Bewertungen'."
         )
     }]
 
@@ -785,8 +790,8 @@ def run_agent():
                 "content-type":      "application/json"
             },
             json={
-                "model":     "claude-sonnet-4-6",
-                "max_tokens": 8000,
+                "model":      "claude-sonnet-4-6",
+                "max_tokens": 1000,   # orchestration only — 1000 is sufficient
                 "system":     [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":      TOOLS,
                 "messages":   messages

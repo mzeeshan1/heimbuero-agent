@@ -238,7 +238,7 @@ def write_outline():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 600,
                 "messages": [{
                     "role": "user",
@@ -391,7 +391,7 @@ def write_article():
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 8000,
                 "messages": [{
                     "role": "user",
@@ -474,7 +474,7 @@ def write_article():
                              "anthropic-version": "2023-06-01",
                              "content-type": "application/json"},
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        "model": "claude-sonnet-4-6",
                         "max_tokens": 80,
                         "messages": [{
                             "role": "user",
@@ -756,7 +756,7 @@ def run_agent():
                 "content-type":      "application/json"
             },
             json={
-                "model":      "claude-sonnet-4-20250514",
+                "model":      "claude-sonnet-4-6",
                 "max_tokens": 1000,
                 "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "tools":    TOOLS,
