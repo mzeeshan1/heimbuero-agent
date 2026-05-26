@@ -472,7 +472,7 @@ def write_comparison_article():
                         f"- Mitten-Ton: ehrliche Alltagsbeobachtung, die zeigt dass Produkte "
                         f"  oft ungenutzt bleiben\n"
                         f"- Ende-Ton: kurzes Understatement das den Mehrwert bestätigt\n"
-                        f"Erfinde eigene Formulierungen passend zum Thema '{STATE.chosen_keyword}'. "
+                        f"Erfinde eigene Formulierungen passend zum Thema '{STATE.comparison_title}'. "                        
                         f"Kein Satz aus diesem Prompt darf wörtlich im Artikel erscheinen.\n"
                         f"Kein Klamauk, kein Witz mit Pointe — ein Augenzwinkern das den "
                         f"Lesefluss auflockert ohne den informativen Ton zu brechen.\n\n"
