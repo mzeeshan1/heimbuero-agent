@@ -71,6 +71,7 @@ class VideoState:
         self.final_video     = ""
         self.vertical_video  = ""
         self.thumbnail_path  = ""
+        self.chosen_keyword = ""
 
 STATE = VideoState()
 
@@ -115,7 +116,11 @@ TOOLS = [
     },
     {
         "name": "fetch_video_clips",
-        "description": "Fetches and downloads relevant stock video clips from Pexels. Must fully complete before assemble_video is called.",
+        "description": (
+            "Fetches and downloads relevant stock video clips from Pexels. "
+            "Use an ENGLISH search term matching the product/topic. "
+            "Prefer the topic stored in chosen_keyword."
+        )
         "input_schema": {
             "type": "object",
             "properties": {
@@ -254,7 +259,22 @@ def fetch_article_content(article_url, article_title):
             STATE.article_url     = article_url
             STATE.article_content = structured
             STATE.article_post_id = post["id"]
+            title_lower = article_title.lower()
 
+            if "headset" in title_lower:
+                STATE.chosen_keyword = "office headset"
+            elif "monitor" in title_lower:
+                STATE.chosen_keyword = "computer monitor office"
+            elif "bürostuhl" in title_lower:
+                STATE.chosen_keyword = "office chair"
+            elif "schreibtisch" in title_lower:
+                STATE.chosen_keyword = "standing desk office"
+            elif "mikrofon" in title_lower:
+                STATE.chosen_keyword = "podcast microphone"
+            elif "tastatur" in title_lower:
+                STATE.chosen_keyword = "computer keyboard desk"
+            else:
+                STATE.chosen_keyword = "home office workspace"
             return {
                 "success":     True,
                 "title":       article_title,
@@ -310,6 +330,7 @@ def generate_video_script():
                         f"=== HUMOR ===\n"
                         f"Bau genau DREI humorvolle Momente ein — verteilt über das Skript, "
                         f"nicht alle auf einmal. Stil: trocken, selbstironisch oder mit einer "
+                        f"subtilen Alltagsbeobachtung.\n"
                         f"Stilbeispiele (NICHT wörtlich übernehmen — nur als Tonbeispiel):\n"
                         f"- Intro-Ton: kurze, trockene Beobachtung aus dem Alltag\n"
                         f"- Mitten-Ton: ehrliche Alltagsbeobachtung, die zeigt dass Produkte "
