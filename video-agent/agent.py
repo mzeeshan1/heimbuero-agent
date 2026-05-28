@@ -116,7 +116,7 @@ TOOLS = [
     },
     {
         "name": "fetch_video_clips",
-        "description": "Fetches and downloads relevant stock video clips from Pexels. Use an ENGLISH search term matching the product/topic. Prefer the topic stored in chosen_keyword."
+        "description": "Fetches and downloads relevant stock video clips from Pexels. Use an ENGLISH search term matching the product/topic. Prefer the topic stored in chosen_keyword.",
         "input_schema": {
             "type": "object",
             "properties": {
